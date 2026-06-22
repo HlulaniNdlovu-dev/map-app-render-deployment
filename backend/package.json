@@ -1,13 +1,13 @@
 {
-  "name": "group_c_backend",
+  "name": "map-app-render-deployment",
   "version": "1.0.0",
   "description": "backend for Mapper",
   "license": "ISC",
-  "author": "Tshiamo Batshidi",
+  "author": "Hlulani Ndlovu",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "nodemon src/server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
