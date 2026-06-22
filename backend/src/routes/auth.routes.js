@@ -38,12 +38,12 @@ router.post('/register', async (req, res) => {
 
         // 4. Evaluate sub-type allocations from ERD definitions
         if (userType === 'normal') {
-            await pool.execute(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
+            await pool.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
         } else {
-            await pool.execute(`INSERT INTO admin (user_id) VALUES (?)`, [newUserId]);
+            await pool.query(`INSERT INTO admin (user_id) VALUES (?)`, [newUserId]);
         }
 
-        await pool.execute('COMMIT');
+        await pool.query('COMMIT');
 
         // 5. Package session payloads
         const token = jwt.sign({ userId: newUserId, userType }, JWT_SECRET, { expiresIn: '4h' });
@@ -54,7 +54,7 @@ router.post('/register', async (req, res) => {
         });
 
     } catch (error) {
-        await pool.execute('ROLLBACK').catch(() => { });
+        await pool.query('ROLLBACK').catch(() => { });
         console.error('Registration runtime error:', error);
 
         if (error.code === 'ER_DUP_ENTRY') {
@@ -93,7 +93,7 @@ router.post('/login', async (req, res) => {
         }
 
         
-        await pool.execute(
+        await pool.query(
             'UPDATE user SET last_login = NOW() WHERE user_id = ?',
             [user.user_id]
         );
