@@ -28,7 +28,7 @@ router.post('/', authenticateToken, async (req, res) => {
   try {
     // 2. Insert using your global or imported async db instance
     // Assumes 'db' is globally accessible, or imported/passed into the file
-    const [result] = await pool.execute(`
+    const [result] = await pool.query(`
       INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type)
       VALUES (?, ?, ?, ?)
     `, [userId, latitude, longitude, hazardType]);
@@ -65,7 +65,7 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ success: false, message: "Database connection uninitialized." });
     }
 
-    const [logs] = await pool.execute(`
+    const [logs] = await pool.query(`
       SELECT 
         hr.id, 
         hr.user_id,
@@ -106,7 +106,7 @@ router.put('/:id', authenticateToken, adminWare, async (req, res) => {
   }
 
   try {
-    const [result] = await pool.execute(
+    const [result] = await pool.query(
       `UPDATE hazard_reports SET hazard_type = ? WHERE id = ?`,
       [hazardType, hazardId]
     );
@@ -130,7 +130,7 @@ router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
   const hazardId = req.params.id;
 
   try {
-    const [result] = await pool.execute(`DELETE FROM hazard_reports WHERE id = ?`, [hazardId]);
+    const [result] = await pool.query(`DELETE FROM hazard_reports WHERE id = ?`, [hazardId]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: "Hazard report not found." });
