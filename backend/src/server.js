@@ -22,7 +22,7 @@ app.use('/api/auth',createAuthRouter)
 app.use('/api/users',userRoute)
 app.use('/api/hazards', hazardRoute)
 app.use('/api/normal-user/destinations', userDestinationRoute)
-app.use('/api/admin-user/destinations', authenticateAdmin,adminDestinationRoute)
+app.use('/api/admin-user/destinations', authenticateToken, authenticateAdmin, adminDestinationRoute)
 app.use("/api/analyse", analyse);
 
 // Root endpoint
