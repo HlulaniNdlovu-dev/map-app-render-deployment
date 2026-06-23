@@ -15,7 +15,7 @@ const router = express.Router();
 
 router.post('/', authenticateToken, async (req, res) => {
   const { latitude, longitude, hazardType } = req.body;
-  const userId = req.user?.userId;  // Assigned by authenticateToken middleware
+  const userId = req.id;  // Assigned by authenticateToken middleware
 
   // 1. Validation check
   if (!userId || !latitude || !longitude || !hazardType) {
