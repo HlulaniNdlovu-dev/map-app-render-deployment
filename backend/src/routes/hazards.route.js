@@ -18,7 +18,7 @@ router.post('/', authenticateToken, async (req, res) => {
   const userId = req.id; // Assigned by authenticateToken middleware
 
   // 1. Validation check
-  if (!userId || latitude === undefined || longitude === undefined || !hazardType) {
+  if (!userId || !latitude || !longitude || !hazardType) {
     return res.status(400).json({ 
       success: false, 
       message: "Malformed hazard schema. Missing parameters." 
