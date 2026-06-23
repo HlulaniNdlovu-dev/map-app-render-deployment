@@ -16,14 +16,7 @@ const router = express.Router();
 router.post('/', authenticateToken, async (req, res) => {
   const { latitude, longitude, hazardType } = req.body;
   const userId = req.id;  // Assigned by authenticateToken middleware
-router.post('/', authenticateToken, async (req, res) => {
-  const { latitude, longitude, hazardType } = req.body;
-  const userId = req.id;
-  
-  console.log("userId:", userId);
-  console.log("latitude:", latitude);
-  console.log("longitude:", longitude);
-  console.log("hazardType:", hazardType);
+
   // 1. Validation check
   if (!userId || !latitude || !longitude || !hazardType) {
     return res.status(400).json({ 
@@ -36,7 +29,7 @@ router.post('/', authenticateToken, async (req, res) => {
     // 2. Insert using your global or imported async db instance
     // Assumes 'db' is globally accessible, or imported/passed into the file
     const [result] = await pool.query(`
-      INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type)
+      INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type)
       VALUES (?, ?, ?, ?)
     `, [userId, latitude, longitude, hazardType]);
 
@@ -82,7 +75,7 @@ router.get('/', async (req, res) => {
         hr.longitude, 
         hr.hazard_type AS hazardType, 
         hr.created_at AS createdAt 
-      FROM hazard_reports hr
+      FROM hazard_report hr
       INNER JOIN user u ON hr.user_id = u.user_id
       ORDER BY hr.created_at DESC
     `);
@@ -114,7 +107,7 @@ router.put('/:id', authenticateToken, adminWare, async (req, res) => {
 
   try {
     const [result] = await pool.query(
-      `UPDATE hazard_reports SET hazard_type = ? WHERE id = ?`,
+      `UPDATE hazard_report SET hazard_type = ? WHERE id = ?`,
       [hazardType, hazardId]
     );
 
@@ -137,7 +130,7 @@ router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
   const hazardId = req.params.id;
 
   try {
-    const [result] = await pool.query(`DELETE FROM hazard_reports WHERE id = ?`, [hazardId]);
+    const [result] = await pool.query(`DELETE FROM hazard_report WHERE id = ?`, [hazardId]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: "Hazard report not found." });
