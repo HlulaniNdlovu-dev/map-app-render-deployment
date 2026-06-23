@@ -16,7 +16,14 @@ const router = express.Router();
 router.post('/', authenticateToken, async (req, res) => {
   const { latitude, longitude, hazardType } = req.body;
   const userId = req.id;  // Assigned by authenticateToken middleware
-
+router.post('/', authenticateToken, async (req, res) => {
+  const { latitude, longitude, hazardType } = req.body;
+  const userId = req.id;
+  
+  console.log("userId:", userId);
+  console.log("latitude:", latitude);
+  console.log("longitude:", longitude);
+  console.log("hazardType:", hazardType);
   // 1. Validation check
   if (!userId || !latitude || !longitude || !hazardType) {
     return res.status(400).json({ 
