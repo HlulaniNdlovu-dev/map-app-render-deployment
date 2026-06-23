@@ -102,7 +102,7 @@ router.put('/:id/password', authenticateToken, adminWare, async (req, res) => {
         }
 
         password;
-        await pool.execute('UPDATE user SET password = ? WHERE user_id = ?', [password, targetUserId]);
+        await pool.query('UPDATE user SET password = ? WHERE user_id = ?', [password, targetUserId]);
 
         return res.status(200).json({ success: true, message: 'Password updated successfully.' });
     } catch (error) {
