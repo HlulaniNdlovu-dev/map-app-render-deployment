@@ -3,7 +3,7 @@ import express from 'express';
 import pool from '../db/db.js';
 import { authenticateToken } from '../middleware/auth.js';
 import adminWare from '../middleware/admin.js';
-// import bcrypt from 'bcryptjs'; // Ensure bcrypt is imported if hashing passwords here
+import bcrypt from 'bcryptjs'; // Ensure bcrypt is imported if hashing passwords here
 const router = express.Router();
 
 
@@ -101,8 +101,8 @@ router.put('/:id/password', authenticateToken, adminWare, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Target user not found.' });
         }
 
-        password;
-        await pool.query('UPDATE user SET password = ? WHERE user_id = ?', [password, targetUserId]);
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await pool.query('UPDATE user SET password = ? WHERE user_id = ?', [hashedPassword, targetUserId]);
 
         return res.status(200).json({ success: true, message: 'Password updated successfully.' });
     } catch (error) {
@@ -110,7 +110,6 @@ router.put('/:id/password', authenticateToken, adminWare, async (req, res) => {
         return res.status(500).json({ success: false, message: 'Internal server operational failure.' });
     }
 });
-
 /**
  * MODIFIED: this previously had NO role check — any authenticated user
  * (including a driver) could delete any account by guessing a user_id.
