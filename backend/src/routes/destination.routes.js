@@ -644,15 +644,19 @@ const adminRouter = express.Router();
  * GET /api/admin-user/destinations/a
  * Global audit log of all destination records across all users.
  */
-adminRouter.get('/a', async (req, res) => {
+adminRouter.get('/', async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT d.id,
-              d.user_id    AS userId,
+              d.user_id         AS userId,
               u.username,
-              d.start_location AS startLocation,
-              d.end_location   AS endLocation,
-              d.created_at     AS createdAt
+              u.email,
+              u.firstname,
+              u.lastname,
+              d.start_location  AS startLocation,
+              d.end_location    AS endLocation,
+              d.hazard_bypassed AS hazardBypassed,
+              d.created_at      AS createdAt
        FROM destination d
        INNER JOIN user u ON d.user_id = u.user_id
        ORDER BY d.created_at DESC`
@@ -667,11 +671,7 @@ adminRouter.get('/a', async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/admin-user/destinations/a/:id
- * Removes a destination log entry by its primary key.
- */
-adminRouter.delete('/a/:id', async (req, res) => {
+adminRouter.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const [result] = await pool.query('DELETE FROM destination WHERE id = ?', [id]);
@@ -687,5 +687,4 @@ adminRouter.delete('/a/:id', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Internal log deletion failure.' });
   }
 });
-
 export { adminRouter, normalUserRouter };
