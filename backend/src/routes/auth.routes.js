@@ -76,22 +76,20 @@ router.post('/login', async (req, res) => {
 
     try {
         // 1. Fetch user by email OR username
-        const [users] = await pool.query(
+        const [[user]] = await pool.query(
             'SELECT * FROM user WHERE email = ? ',
             [identifier]
         );
 
-        if (users.length === 0) {
+        if (!user) {
             return res.status(401).json({ message: 'Invalid credentials.' });
         }
-        const user = users[0];
 
         // 2. Compare passwords
-        const isPasswordValid = (password === user.password);//await bcrypt.compare(password, user.password);
+        const isPasswordValid = await bcrypt.compare(password, user.password);
         if (!isPasswordValid) {
             return res.status(401).json({ message: 'Invalid credentials.' });
         }
-
         
         await pool.query(
             'UPDATE user SET last_login = NOW() WHERE user_id = ?',
