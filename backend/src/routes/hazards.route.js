@@ -29,8 +29,8 @@ router.post('/', authenticateToken, async (req, res) => {
     // 2. Insert using your global or imported async db instance
     // Assumes 'db' is globally accessible, or imported/passed into the file
     const [result] = await pool.query(`
-      INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type, created_at)
+      VALUES (?, ?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))
     `, [userId, latitude, longitude, hazardType]);
 
     // 3. Return clean JSON payload
