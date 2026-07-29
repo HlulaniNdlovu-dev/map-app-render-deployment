@@ -1,10 +1,10 @@
 import mysql from 'mysql2/promise';
 
 const pool = mysql.createPool({
-    host: process.env.MYSQLHOST || 'reseau.proxy.rlwy.net',
-    port: process.env.MYSQLPORT || '23027',
+    host: process.env.MYSQLHOST || 'sakura.proxy.rlwy.net',
+    port: process.env.MYSQLPORT || '22943',
     user: process.env.MYSQLUSER || 'root',
-    password: process.env.MYSQLPASSWORD || 'KKoPJqguYVkgPnWXjibpGyWHDeKicJDe',
+    password: process.env.MYSQLPASSWORD || 'NrdknzjgNMxcbhhROHbvSBIscXxcZuXA',
     database: process.env.MYSQLDATABASE || 'safe_route',
 });
 
