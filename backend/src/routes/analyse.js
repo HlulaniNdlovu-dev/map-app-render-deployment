@@ -1,9 +1,14 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
+import { fileURLToPath } from 'url';
 import { calculateAreaRisk, RISK_CATEGORIES } from '../services/assessRisk.js';
 
-dotenv.config({ path: new URL('../.env', import.meta.url).pathname });
+// fileURLToPath (not .pathname) so this resolves correctly on Windows too —
+// a raw file:// URL's .pathname keeps a leading slash before the drive
+// letter (e.g. "/C:/Users/...") which isn't a valid filesystem path there,
+// so dotenv would silently fail to find/load the .env file on Windows.
+dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)) });
 
 const router = express.Router();
 

@@ -108,7 +108,7 @@ async function loadRoutingContext() {
 
   try {
     const [hazardRows] = await pool.query(
-      'SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_report WHERE latitude IS NOT NULL AND longitude IS NOT NULL'
+      "SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND status = 'active'"
     );
     events = hazardRows;
   } catch (err) {
@@ -325,12 +325,24 @@ function buildCandidate(item, scoring, label, startLocation, endLocation) {
 async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocation, endLocation, ctx) {
   const candidates = [];
   const viaPoints = bypassViaPoints(incidents, startCoord, endCoord);
+  // Scoped context used only to count hits against the specific hazards
+  // this detour is meant to avoid — see note below.
+  const blockingCtx = { events: incidents, areas: [], alerts: [] };
 
   for (const via of viaPoints.slice(0, 8)) {
     for (const osrmItem of await fetchOsrmPath(startCoord, via, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      if (scoring.incidentsOnRoute >= incidents.length) continue;
+      // Gate on hits against the incidents this detour was built to avoid,
+      // not the total incident count city-wide — a detour that clears the
+      // incidents blocking the direct route is a real improvement even if
+      // it happens to pass near some unrelated incident elsewhere. Gating
+      // on the total count instead rejected every detour whenever any
+      // other incident existed nearby, which is exactly the case for
+      // incidents close to the user's own starting point (a dense local
+      // cluster), while long trips rarely pass near unrelated incidents.
+      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
+      if (blockingHits >= incidents.length) continue;
       const label =
         scoring.incidentsOnRoute === 0
           ? 'Safer detour (clear of hazards)'
@@ -344,7 +356,8 @@ async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocati
     for (const osrmItem of await fetchOsrmPath(startCoord, via0, via1, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      if (scoring.incidentsOnRoute === 0) {
+      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
+      if (blockingHits === 0) {
         candidates.push(
           buildCandidate(osrmItem, scoring, 'Multi-point detour (clear of hazards)', startLocation, endLocation)
         );
@@ -529,7 +542,7 @@ const normalUserRouter = express.Router();
  */
 normalUserRouter.post('/', async (req, res) => {
   const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
-  const userId = req.id || 5;
+  const userId = req.id;
 
   if (!startLocation || !endLocation) {
     return res.status(400).json({
@@ -587,6 +600,7 @@ normalUserRouter.get('/', async (req, res) => {
       `SELECT id,
               start_location AS startLocation,
               end_location   AS endLocation,
+              ended_at       AS endedAt,
               created_at     AS createdAt
        FROM destination
        WHERE user_id = ?
@@ -600,6 +614,31 @@ normalUserRouter.get('/', async (req, res) => {
       success: false,
       message: 'Internal server data retrieval failure.',
     });
+  }
+});
+
+/**
+ * PATCH /api/normal-user/destinations/:id/end
+ * Marks a logged trip as completed (the "End Trip" use case) — records
+ * when the driver actually reached their destination. Scoped to the
+ * authenticated user's own trip.
+ */
+normalUserRouter.patch('/:id/end', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [result] = await pool.query(
+      `UPDATE destination SET ended_at = CONVERT_TZ(NOW(), @@session.time_zone, '+02:00') WHERE id = ? AND user_id = ?`,
+      [id, req.id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Trip not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Trip ended.' });
+  } catch (err) {
+    console.error('Failed to end trip:', err);
+    return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
   }
 });
 
