@@ -3,58 +3,68 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import pool from '../db/db.js';
+import { authenticateToken } from '../middleware/auth.js';
+import adminWare from '../middleware/admin.js';
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_routing_key_123';
 
-// Authentication Sign-Up Route -> maps to POST /api/auth/register
+// Every role beyond plain driver maps to its own subtype table, mirroring
+// the existing driver/admin pattern.
+const ROLE_TABLES = {
+    driver: 'driver',
+    admin: 'admin',
+    traffic_authority: 'traffic_authority',
+    security_agency: 'security_agency',
+    data_analyst: 'data_analyst',
+};
+const STAFF_ROLES = ['admin', 'traffic_authority', 'security_agency', 'data_analyst'];
+
+async function insertUserRow(connection, { email, password, username, firstName, lastName }) {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const [userResult] = await connection.query(
+        `INSERT INTO user (email, password, username, firstname, lastname)
+             VALUES (?, ?, ?, ?, ?)`,
+        [email, hashedPassword, username, firstName, lastName]
+    );
+    return userResult.insertId;
+}
+
+/**
+ * Public sign-up -> POST /api/auth/register
+ * This is the only self-service path into the system, so it is hard-wired
+ * to always create a driver account — any `userType` in the request body
+ * is ignored. Staff roles (admin, traffic authority, security agency,
+ * data analyst) can only be created by an existing admin, via
+ * POST /api/auth/register-staff below. (Previously this endpoint trusted
+ * the client-supplied userType and made ANYONE who passed a non-"normal"
+ * value an admin — a real privilege-escalation hole.)
+ */
 router.post('/register', async (req, res) => {
-    const { email, password, username, firstName, lastName, userType } = req.body;
+    const { email, password, username, firstName, lastName } = req.body;
 
     if (!email || !password || !username) {
         return res.status(400).json({ message: 'Missing essential validation elements.' });
     }
 
-    // A transaction has to run on a single dedicated connection — calling
-    // pool.query() for START TRANSACTION/COMMIT pulls a fresh pooled
-    // connection each time, so none of those statements actually shared a
-    // connection and the "transaction" was a no-op with no atomicity.
     const connection = await pool.getConnection();
     try {
-        // 1. Check for existing identifier usage
         const [existingUser] = await connection.query('SELECT user_id FROM user WHERE email = ? OR username = ?', [email, username]);
         if (existingUser.length > 0) {
             return res.status(400).json({ message: 'User with this email or username already exists.' });
         }
 
-        // 2. Compute secure hash
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        // 3. Begin Transaction isolation block
         await connection.beginTransaction();
 
-        const [userResult] = await connection.query(
-            `INSERT INTO user (email, password, username, firstname, lastname)
-                 VALUES (?, ?, ?, ?, ?)`,
-            [email, hashedPassword, username, firstName, lastName]
-        );
-
-        const newUserId = userResult.insertId;
-
-        // 4. Evaluate sub-type allocations from ERD definitions
-        if (userType === 'normal') {
-            await connection.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
-        } else {
-            await connection.query(`INSERT INTO admin (user_id) VALUES (?)`, [newUserId]);
-        }
+        const newUserId = await insertUserRow(connection, { email, password, username, firstName, lastName });
+        await connection.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
 
         await connection.commit();
 
-        // 5. Package session payloads
-        const token = jwt.sign({ userId: newUserId, userType }, JWT_SECRET, { expiresIn: '4h' });
+        const token = jwt.sign({ userId: newUserId, userType: 'normal' }, JWT_SECRET, { expiresIn: '4h' });
 
         return res.status(201).json({
-            userType,
+            userType: 'normal',
             token
         });
 
@@ -73,6 +83,69 @@ router.post('/register', async (req, res) => {
     }
 });
 
+/**
+ * Admin-only staff provisioning -> POST /api/auth/register-staff
+ * Creates an account for one of the roles an admin manages: System
+ * Administrator, Traffic Authority, Security Agency, or Data Analyst.
+ * Body: { email, password, username, firstName, lastName, role }
+ */
+router.post('/register-staff', authenticateToken, adminWare, async (req, res) => {
+    const { email, password, username, firstName, lastName, role } = req.body;
+
+    if (!email || !password || !username || !role) {
+        return res.status(400).json({ message: 'email, password, username and role are required.' });
+    }
+    if (!STAFF_ROLES.includes(role)) {
+        return res.status(400).json({ message: `role must be one of: ${STAFF_ROLES.join(', ')}` });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        const [existingUser] = await connection.query('SELECT user_id FROM user WHERE email = ? OR username = ?', [email, username]);
+        if (existingUser.length > 0) {
+            return res.status(400).json({ message: 'User with this email or username already exists.' });
+        }
+
+        await connection.beginTransaction();
+
+        const newUserId = await insertUserRow(connection, { email, password, username, firstName, lastName });
+        await connection.query(`INSERT INTO ${ROLE_TABLES[role]} (user_id) VALUES (?)`, [newUserId]);
+
+        await connection.commit();
+
+        return res.status(201).json({
+            success: true,
+            message: `${role} account created.`,
+            userId: newUserId,
+            userType: role,
+        });
+
+    } catch (error) {
+        await connection.rollback().catch(() => { });
+        console.error('Staff registration runtime error:', error);
+
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(400).json({ message: 'User with this email or username already exists.' });
+        }
+        return res.status(500).json({ message: 'Internal server operational failure.' });
+    } finally {
+        connection.release();
+    }
+});
+
+/**
+ * Determines a user's role by checking each subtype table. A user should
+ * only ever appear in one of these; driver is the implicit default since
+ * every self-registered account lands there.
+ */
+async function resolveUserType(userId) {
+    for (const role of ['admin', 'traffic_authority', 'security_agency', 'data_analyst']) {
+        const [rows] = await pool.query(`SELECT 1 FROM ${ROLE_TABLES[role]} WHERE user_id = ?`, [userId]);
+        if (rows.length > 0) return role;
+    }
+    return 'normal';
+}
+
 // Authentication Login Route -> maps to POST /api/auth/login
 router.post('/login', async (req, res) => {
     const { identifier, password } = req.body;
@@ -84,8 +157,8 @@ router.post('/login', async (req, res) => {
     try {
         // 1. Fetch user by email OR username
         const [[user]] = await pool.query(
-            'SELECT * FROM user WHERE email = ? ',
-            [identifier]
+            'SELECT * FROM user WHERE email = ? OR username = ?',
+            [identifier, identifier]
         );
 
         if (!user) {
@@ -97,30 +170,25 @@ router.post('/login', async (req, res) => {
         if (!isPasswordValid) {
             return res.status(401).json({ message: 'Invalid credentials.' });
         }
-        
+
         await pool.query(
             'UPDATE user SET last_login = NOW() WHERE user_id = ?',
             [user.user_id]
         );
 
-        // 4. Determine userType by checking the sub-type tables
-        let userType = 'normal';
-        const [isAdmin] = await pool.query('SELECT admin_id FROM admin WHERE user_id = ?', [user.user_id]);
+        // 3. Determine role by checking every subtype table
+        const userType = await resolveUserType(user.user_id);
 
-        if (isAdmin.length > 0) {
-            userType = 'admin';
-        }
-
-        // 5. Generate session token
+        // 4. Generate session token
         const token = jwt.sign(
-            { userId: user.user_id, userType: userType },
+            { userId: user.user_id, userType },
             JWT_SECRET,
             { expiresIn: '4h' }
         );
 
         return res.status(200).json({
-            userType: userType,
-            token: token
+            userType,
+            token
         });
 
     } catch (error) {

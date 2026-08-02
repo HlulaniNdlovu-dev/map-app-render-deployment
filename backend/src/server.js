@@ -10,6 +10,7 @@ import userRoute from "./routes/user.routes.js"
 import hazardRoute from "./routes/hazards.route.js"
 import {adminRouter as adminDestinationRoute,normalUserRouter as userDestinationRoute } from "./routes/destination.routes.js"
 import analyse from "./routes/analyse.js"
+import reportsRoute from "./routes/reports.routes.js"
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_routing_key_123';
@@ -21,9 +22,10 @@ app.use(express.json());
 app.use('/api/auth',createAuthRouter)
 app.use('/api/users',userRoute)
 app.use('/api/hazards', hazardRoute)
-app.use('/api/normal-user/destinations', userDestinationRoute)
+app.use('/api/normal-user/destinations', authenticateToken, userDestinationRoute)
 app.use('/api/admin-user/destinations', authenticateToken, authenticateAdmin, adminDestinationRoute)
 app.use("/api/analyse", analyse);
+app.use("/api/reports", reportsRoute);
 
 // Root endpoint
 app.get('/', (req, res) => {

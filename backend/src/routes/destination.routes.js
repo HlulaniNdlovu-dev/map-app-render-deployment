@@ -108,7 +108,7 @@ async function loadRoutingContext() {
 
   try {
     const [hazardRows] = await pool.query(
-      'SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_report WHERE latitude IS NOT NULL AND longitude IS NOT NULL'
+      "SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND status = 'active'"
     );
     events = hazardRows;
   } catch (err) {
@@ -542,7 +542,7 @@ const normalUserRouter = express.Router();
  */
 normalUserRouter.post('/', async (req, res) => {
   const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
-  const userId = req.id || 5;
+  const userId = req.id;
 
   if (!startLocation || !endLocation) {
     return res.status(400).json({
@@ -600,6 +600,7 @@ normalUserRouter.get('/', async (req, res) => {
       `SELECT id,
               start_location AS startLocation,
               end_location   AS endLocation,
+              ended_at       AS endedAt,
               created_at     AS createdAt
        FROM destination
        WHERE user_id = ?
@@ -613,6 +614,31 @@ normalUserRouter.get('/', async (req, res) => {
       success: false,
       message: 'Internal server data retrieval failure.',
     });
+  }
+});
+
+/**
+ * PATCH /api/normal-user/destinations/:id/end
+ * Marks a logged trip as completed (the "End Trip" use case) — records
+ * when the driver actually reached their destination. Scoped to the
+ * authenticated user's own trip.
+ */
+normalUserRouter.patch('/:id/end', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [result] = await pool.query(
+      `UPDATE destination SET ended_at = CONVERT_TZ(NOW(), @@session.time_zone, '+02:00') WHERE id = ? AND user_id = ?`,
+      [id, req.id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Trip not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Trip ended.' });
+  } catch (err) {
+    console.error('Failed to end trip:', err);
+    return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
   }
 });
 
