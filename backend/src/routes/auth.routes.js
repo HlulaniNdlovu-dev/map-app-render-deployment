@@ -37,7 +37,7 @@ async function insertUserRow(connection, { email, password, username, firstName,
  * is ignored. Staff roles (admin, traffic authority, security agency,
  * data analyst) can only be created by an existing admin, via
  * POST /api/auth/register-staff below. (Previously this endpoint trusted
- * the client-supplied userType and made ANYONE who passed a non-"normal"
+ * the client-supplied userType and made ANYONE who passed a non-"driver"
  * value an admin — a real privilege-escalation hole.)
  */
 router.post('/register', async (req, res) => {
@@ -61,10 +61,10 @@ router.post('/register', async (req, res) => {
 
         await connection.commit();
 
-        const token = jwt.sign({ userId: newUserId, userType: 'normal' }, JWT_SECRET, { expiresIn: '4h' });
+        const token = jwt.sign({ userId: newUserId, userType: 'driver' }, JWT_SECRET, { expiresIn: '4h' });
 
         return res.status(201).json({
-            userType: 'normal',
+            userType: 'driver',
             token
         });
 
@@ -143,7 +143,7 @@ async function resolveUserType(userId) {
         const [rows] = await pool.query(`SELECT 1 FROM ${ROLE_TABLES[role]} WHERE user_id = ?`, [userId]);
         if (rows.length > 0) return role;
     }
-    return 'normal';
+    return 'driver';
 }
 
 // Authentication Login Route -> maps to POST /api/auth/login
