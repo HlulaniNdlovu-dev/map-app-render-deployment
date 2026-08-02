@@ -15,9 +15,14 @@ router.post('/register', async (req, res) => {
         return res.status(400).json({ message: 'Missing essential validation elements.' });
     }
 
+    // A transaction has to run on a single dedicated connection — calling
+    // pool.query() for START TRANSACTION/COMMIT pulls a fresh pooled
+    // connection each time, so none of those statements actually shared a
+    // connection and the "transaction" was a no-op with no atomicity.
+    const connection = await pool.getConnection();
     try {
         // 1. Check for existing identifier usage
-        const [existingUser] = await pool.query('SELECT user_id FROM user WHERE email = ? OR username = ?', [email, username]);
+        const [existingUser] = await connection.query('SELECT user_id FROM user WHERE email = ? OR username = ?', [email, username]);
         if (existingUser.length > 0) {
             return res.status(400).json({ message: 'User with this email or username already exists.' });
         }
@@ -26,10 +31,10 @@ router.post('/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
 
         // 3. Begin Transaction isolation block
-        await pool.query('START TRANSACTION');
+        await connection.beginTransaction();
 
-        const [userResult] = await pool.query(
-            `INSERT INTO user (email, password, username, firstname, lastname) 
+        const [userResult] = await connection.query(
+            `INSERT INTO user (email, password, username, firstname, lastname)
                  VALUES (?, ?, ?, ?, ?)`,
             [email, hashedPassword, username, firstName, lastName]
         );
@@ -38,12 +43,12 @@ router.post('/register', async (req, res) => {
 
         // 4. Evaluate sub-type allocations from ERD definitions
         if (userType === 'normal') {
-            await pool.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
+            await connection.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
         } else {
-            await pool.query(`INSERT INTO admin (user_id) VALUES (?)`, [newUserId]);
+            await connection.query(`INSERT INTO admin (user_id) VALUES (?)`, [newUserId]);
         }
 
-        await pool.query('COMMIT');
+        await connection.commit();
 
         // 5. Package session payloads
         const token = jwt.sign({ userId: newUserId, userType }, JWT_SECRET, { expiresIn: '4h' });
@@ -54,7 +59,7 @@ router.post('/register', async (req, res) => {
         });
 
     } catch (error) {
-        await pool.query('ROLLBACK').catch(() => { });
+        await connection.rollback().catch(() => { });
         console.error('Registration runtime error:', error);
 
         if (error.code === 'ER_DUP_ENTRY') {
@@ -63,6 +68,8 @@ router.post('/register', async (req, res) => {
             });
         }
         return res.status(500).json({ message: 'Internal server operational failure.' });
+    } finally {
+        connection.release();
     }
 });
 

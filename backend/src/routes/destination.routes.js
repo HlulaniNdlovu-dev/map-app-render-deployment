@@ -325,12 +325,24 @@ function buildCandidate(item, scoring, label, startLocation, endLocation) {
 async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocation, endLocation, ctx) {
   const candidates = [];
   const viaPoints = bypassViaPoints(incidents, startCoord, endCoord);
+  // Scoped context used only to count hits against the specific hazards
+  // this detour is meant to avoid — see note below.
+  const blockingCtx = { events: incidents, areas: [], alerts: [] };
 
   for (const via of viaPoints.slice(0, 8)) {
     for (const osrmItem of await fetchOsrmPath(startCoord, via, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      if (scoring.incidentsOnRoute >= incidents.length) continue;
+      // Gate on hits against the incidents this detour was built to avoid,
+      // not the total incident count city-wide — a detour that clears the
+      // incidents blocking the direct route is a real improvement even if
+      // it happens to pass near some unrelated incident elsewhere. Gating
+      // on the total count instead rejected every detour whenever any
+      // other incident existed nearby, which is exactly the case for
+      // incidents close to the user's own starting point (a dense local
+      // cluster), while long trips rarely pass near unrelated incidents.
+      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
+      if (blockingHits >= incidents.length) continue;
       const label =
         scoring.incidentsOnRoute === 0
           ? 'Safer detour (clear of hazards)'
@@ -344,7 +356,8 @@ async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocati
     for (const osrmItem of await fetchOsrmPath(startCoord, via0, via1, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      if (scoring.incidentsOnRoute === 0) {
+      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
+      if (blockingHits === 0) {
         candidates.push(
           buildCandidate(osrmItem, scoring, 'Multi-point detour (clear of hazards)', startLocation, endLocation)
         );
