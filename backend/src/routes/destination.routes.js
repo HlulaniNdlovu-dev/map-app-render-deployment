@@ -544,47 +544,57 @@ normalUserRouter.post('/', async (req, res) => {
   const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
   const userId = req.id;
 
-  if (!startLocation || !endLocation) {
+  if (typeof startLocation !== 'string' || typeof endLocation !== 'string' || !startLocation.trim() || !endLocation.trim()) {
     return res.status(400).json({
       success: false,
       message: 'Missing startLocation or endLocation parameters.',
     });
   }
 
-  // Coordinates are required for full route generation.
-  if (startLng == null || startLat == null || endLng == null || endLat == null) {
-    return res.status(400).json({
-      success: false,
-      message: 'Missing coordinate parameters (startLng, startLat, endLng, endLat).',
-    });
-  }
-
   try {
-    // 1. Generate the safest route using the rerouting engine
-    const routeResult = await generateRoute(
-      startLocation,
-      endLocation,
-      [parseFloat(startLng), parseFloat(startLat)],
-      [parseFloat(endLng), parseFloat(endLat)]
-    );
-
-    // 2. Persist the destination log
+    // Persist independently of route generation. The map page already generates
+    // its route client-side and sends only the two location labels, so requiring
+    // coordinates here previously rejected every valid destination submission.
     const [result] = await pool.query(
       `INSERT INTO destination (user_id, start_location, end_location) VALUES (?, ?, ?)`,
-      [userId, startLocation, endLocation]
+      [userId, startLocation.trim(), endLocation.trim()]
     );
+
+    const hasCoordinates = [startLng, startLat, endLng, endLat].every(
+      (value) => value != null && Number.isFinite(Number(value))
+    );
+
+    // Preserve route-generation support for callers that provide coordinates,
+    // but never roll back a successfully saved destination when routing fails.
+    if (hasCoordinates) {
+      try {
+        const route = await generateRoute(
+          startLocation.trim(),
+          endLocation.trim(),
+          [Number(startLng), Number(startLat)],
+          [Number(endLng), Number(endLat)]
+        );
+        return res.status(201).json({
+          success: true,
+          message: 'Destination saved and route generated successfully.',
+          logId: result.insertId,
+          route,
+        });
+      } catch (routeError) {
+        console.warn('Destination saved, but route generation failed:', routeError.message);
+      }
+    }
 
     return res.status(201).json({
       success: true,
-      message: 'Route generated and destination tracked successfully.',
+      message: 'Destination saved successfully.',
       logId: result.insertId,
-      route: routeResult,
     });
   } catch (err) {
-    console.error('Route generation or tracking failure:', err);
+    console.error('Destination tracking failure:', err);
     return res.status(500).json({
       success: false,
-      message: 'Internal server failure during route generation.',
+      message: 'Internal server failure while saving the destination.',
     });
   }
 });
@@ -695,6 +705,7 @@ adminRouter.get('/', async (req, res) => {
               d.start_location  AS startLocation,
               d.end_location    AS endLocation,
               d.hazard_bypassed AS hazardBypassed,
+              d.ended_at        AS endedAt,
               d.created_at      AS createdAt
        FROM destination d
        INNER JOIN user u ON d.user_id = u.user_id
