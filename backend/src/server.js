@@ -11,6 +11,7 @@ import hazardRoute from "./routes/hazards.route.js"
 import {adminRouter as adminDestinationRoute,normalUserRouter as userDestinationRoute } from "./routes/destination.routes.js"
 import analyse from "./routes/analyse.js"
 import reportsRoute from "./routes/reports.routes.js"
+import aiRoute from "./routes/ai.routes.js"
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_routing_key_123';
@@ -26,6 +27,7 @@ app.use('/api/normal-user/destinations', authenticateToken, userDestinationRoute
 app.use('/api/admin-user/destinations', authenticateToken, authenticateAdmin, adminDestinationRoute)
 app.use("/api/analyse", analyse);
 app.use("/api/reports", reportsRoute);
+app.use("/api/ai", aiRoute);
 
 // Root endpoint
 app.get('/', (req, res) => {

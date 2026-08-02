@@ -2,7 +2,9 @@ import express from 'express';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 import { fileURLToPath } from 'url';
-import { calculateAreaRisk, RISK_CATEGORIES } from '../services/assessRisk.js';
+import { authenticateToken } from '../middleware/auth.js';
+import requireRole from '../middleware/role.js';
+import { classifyArticleText } from '../services/classifyNews.js';
 
 // fileURLToPath (not .pathname) so this resolves correctly on Windows too —
 // a raw file:// URL's .pathname keeps a leading slash before the drive
@@ -11,6 +13,13 @@ import { calculateAreaRisk, RISK_CATEGORIES } from '../services/assessRisk.js';
 dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)) });
 
 const router = express.Router();
+
+// These endpoints call OpenAI on every request — unrestricted, anyone could
+// burn API quota with no rate limit or role check. Restricted to the roles
+// that actually use AI classification (Admin reviews the safety picture,
+// Data Analyst reviews hotspots); drivers/traffic authority/security agency
+// have no reason to call these directly.
+const aiOnly = requireRole('admin', 'data_analyst');
 
 router.get('/health', (req, res) => {
     res.json({ status: 'ok', route: '/api/analyse', apiKeyLoaded: !!process.env.OPENAI_API_KEY });
@@ -21,10 +30,11 @@ const MODEL  = 'gpt-4o-mini';
 
 /* =============================================================
    POST /api/analyse
-   Analyses a news article.
-   Returns: { location, risk_category, summary }
+   Analyses a news article. Admin/Data Analyst only.
+   Returns: { location, risk_category, summary, confidence, hazard_type,
+              risk_score, risk_level, display_color }
 ============================================================= */
-router.post('/', async (req, res) => {
+router.post('/', authenticateToken, aiOnly, async (req, res) => {
     const { text } = req.body;
 
     if (!text) {
@@ -32,74 +42,20 @@ router.post('/', async (req, res) => {
     }
 
     try {
-        const completion = await client.chat.completions.create({
-            model: MODEL,
-            messages: [
-                {
-                    role: 'system',
-                    content: 'You are a risk assessment analyst for a route safety application in South Africa. Respond ONLY with valid JSON — no markdown, no explanation.'
-                },
-                {
-                    role: 'user',
-                    content: `Analyse this news article and return a JSON object with exactly these fields:
-{
-  "location": "the specific place mentioned (in a format usable in a map app)",
-  "risk_category": "one of: Crime, Protest, Natural Disaster, Accident, Infrastructure, Civil Unrest, Other",
-  "summary": "1 sentence plain English summary of what happened"
-}
-
-Article:
-${text}`
-                }
-            ],
-            response_format: { type: 'json_object' }
-        });
-
-        const rawContent = completion.choices?.[0]?.message?.content;
-        if (!rawContent) {
-            throw new Error('OpenAI returned no completion content.');
-        }
-
-        let parsed;
-        try {
-            parsed = JSON.parse(rawContent);
-        } catch (parseError) {
-            console.error('Failed to parse OpenAI response as JSON:', rawContent);
-            throw new Error(`OpenAI response parse failed: ${parseError.message}`);
-        }
-
-        const category = parsed.risk_category || 'Other';
-        const baseCategory = {
-            Crime: RISK_CATEGORIES.VIOLENT_CRIME,
-            Protest: RISK_CATEGORIES.CIVIL_UNREST,
-            'Civil Unrest': RISK_CATEGORIES.CIVIL_UNREST,
-            'Natural Disaster': RISK_CATEGORIES.ENVIRONMENTAL_HAZARDS,
-            Accident: RISK_CATEGORIES.ENVIRONMENTAL_HAZARDS,
-            Infrastructure: RISK_CATEGORIES.INFRASTRUCTURE_ISSUES,
-            Other: RISK_CATEGORIES.INFRASTRUCTURE_ISSUES
-        }[category] || RISK_CATEGORIES.INFRASTRUCTURE_ISSUES;
-
-        const riskAssessment = calculateAreaRisk(baseCategory, 0);
-
-        res.json({
-            ...parsed,
-            risk_score: riskAssessment.overallRiskScore,
-            risk_level: riskAssessment.assessment,
-            display_color: riskAssessment.displayColor
-        });
-
+        const result = await classifyArticleText(text);
+        res.json(result);
     } catch (error) {
         console.error('AI analysis error:', error);
-        res.status(500).json({ error: 'Failed to analyse article.', details: error.message });
+        res.status(502).json({ error: 'Failed to analyse article.', details: error.message });
     }
 });
 
 /* =============================================================
    POST /api/analyse/shorten
-   Shortens a location string and incident description.
+   Shortens a location string and incident description. Admin/Data Analyst only.
    Returns: { short_location, short_description }
 ============================================================= */
-router.post('/shorten', async (req, res) => {
+router.post('/shorten', authenticateToken, aiOnly, async (req, res) => {
     const { location, description } = req.body;
 
     if (!location || !description) {
@@ -134,7 +90,7 @@ Description: ${description}`
 
     } catch (error) {
         console.error('AI shorten error:', error);
-        res.status(500).json({ error: 'Failed to shorten.' });
+        res.status(502).json({ error: 'Failed to shorten.' });
     }
 });
 
@@ -142,6 +98,9 @@ Description: ${description}`
    POST /api/analyse/safe_route
    Fetches real road routes via OSRM, then uses AI to pick the
    one that stays furthest from the provided danger zones.
+   Admin/Data Analyst only (see docs/IMPROVEMENT-PLAN.md §2 — this is a
+   separate, currently-unused-by-the-frontend AI routing mechanism,
+   distinct from the SafeMaster deterministic scorer).
 
    Body:
      start       [lng, lat]   — user's current position
@@ -149,7 +108,7 @@ Description: ${description}`
      avoidPlaces [lng, lat][] — dangerous coordinates to avoid
    Returns: { coordinates: [lng, lat][] }
 ============================================================= */
-router.post('/safe_route', async (req, res) => {
+router.post('/safe_route', authenticateToken, aiOnly, async (req, res) => {
     const { start, destination, avoidPlaces } = req.body;
 
     if (!start || !destination) {
@@ -162,7 +121,8 @@ router.post('/safe_route', async (req, res) => {
         // Step 1: Fetch real road-following routes from OSRM (same engine as fetchRoutes in utils.ts)
         // OSRM expects: lng,lat;lng,lat
         // destination arrives as [lat, lng] from MapPage, so we flip it here
-        const osrmUrl = `https://router.project-osrm.org/route/v1/driving/` +
+        const osrmBase = process.env.OSRM_BASE_URL || 'https://router.project-osrm.org/route/v1/driving';
+        const osrmUrl = `${osrmBase}/` +
                         `${start[0]},${start[1]};${destination[1]},${destination[0]}` +
                         `?overview=full&geometries=geojson&alternatives=true`;
         const osrmRes = await fetch(osrmUrl);
@@ -223,7 +183,7 @@ Return a JSON object with exactly these fields:
 
     } catch (error) {
         console.error('Safe route error:', error);
-        res.status(500).json({ error: 'Failed to generate safe route.' });
+        res.status(502).json({ error: 'Failed to generate safe route.' });
     }
 });
 
