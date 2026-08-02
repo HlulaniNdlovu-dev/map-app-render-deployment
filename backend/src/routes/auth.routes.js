@@ -7,7 +7,12 @@ import { authenticateToken } from '../middleware/auth.js';
 import adminWare from '../middleware/admin.js';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_routing_key_123';
+// No fallback — see middleware/auth.js for why. Both must read the same
+// env var since one signs tokens and the other verifies them.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    throw new Error('JWT_SECRET environment variable is not set.');
+}
 
 // Every role beyond plain driver maps to its own subtype table, mirroring
 // the existing driver/admin pattern.
@@ -41,7 +46,7 @@ async function insertUserRow(connection, { email, password, username, firstName,
  * value an admin — a real privilege-escalation hole.)
  */
 router.post('/register', async (req, res) => {
-    const { email, password, username, firstName, lastName } = req.body;
+    const { email, password, username, firstName, lastName } = req.body || {};
 
     if (!email || !password || !username) {
         return res.status(400).json({ message: 'Missing essential validation elements.' });
@@ -90,7 +95,7 @@ router.post('/register', async (req, res) => {
  * Body: { email, password, username, firstName, lastName, role }
  */
 router.post('/register-staff', authenticateToken, adminWare, async (req, res) => {
-    const { email, password, username, firstName, lastName, role } = req.body;
+    const { email, password, username, firstName, lastName, role } = req.body || {};
 
     if (!email || !password || !username || !role) {
         return res.status(400).json({ message: 'email, password, username and role are required.' });
@@ -101,32 +106,32 @@ router.post('/register-staff', authenticateToken, adminWare, async (req, res) =>
 
     const connection = await pool.getConnection();
     try {
-        const [existingUser] = await connection.query('SELECT user_id FROM user WHERE email = ? OR username = ?', [email, username]);
-        if (existingUser.length > 0) {
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // sp_create_staff_account does the duplicate check + user insert +
+        // role-subtype insert atomically in one transaction server-side.
+        await connection.query(
+            'CALL sp_create_staff_account(?, ?, ?, ?, ?, ?, @p_user_id, @p_status)',
+            [email, hashedPassword, username, firstName, lastName, role]
+        );
+        const [[out]] = await connection.query('SELECT @p_user_id AS userId, @p_status AS status');
+
+        if (out.status === 'DUPLICATE') {
             return res.status(400).json({ message: 'User with this email or username already exists.' });
         }
-
-        await connection.beginTransaction();
-
-        const newUserId = await insertUserRow(connection, { email, password, username, firstName, lastName });
-        await connection.query(`INSERT INTO ${ROLE_TABLES[role]} (user_id) VALUES (?)`, [newUserId]);
-
-        await connection.commit();
+        if (out.status !== 'OK') {
+            return res.status(500).json({ message: 'Internal server operational failure.' });
+        }
 
         return res.status(201).json({
             success: true,
             message: `${role} account created.`,
-            userId: newUserId,
+            userId: out.userId,
             userType: role,
         });
 
     } catch (error) {
-        await connection.rollback().catch(() => { });
         console.error('Staff registration runtime error:', error);
-
-        if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ message: 'User with this email or username already exists.' });
-        }
         return res.status(500).json({ message: 'Internal server operational failure.' });
     } finally {
         connection.release();
@@ -148,7 +153,7 @@ async function resolveUserType(userId) {
 
 // Authentication Login Route -> maps to POST /api/auth/login
 router.post('/login', async (req, res) => {
-    const { identifier, password } = req.body;
+    const { identifier, password } = req.body || {};
 
     if (!identifier || !password) {
         return res.status(400).json({ message: 'Identifier and password are required.' });

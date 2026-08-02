@@ -7,7 +7,10 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "migrate": "node src/db/migrate.mjs",
+    "seed": "node src/db/seed.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -20,10 +23,15 @@
     "mysql2": "^3.22.5",
     "nodemon": "^3.1.14",
     "openai": "^6.44.0",
+    "pdfkit": "^0.19.1",
     "react": "^19.2.7",
     "react-hot-toast": "^2.6.0",
     "rss-parser": "^3.13.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2",
+    "vitest": "^4.1.10"
   }
 }

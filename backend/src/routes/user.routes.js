@@ -3,7 +3,7 @@ import express from 'express';
 import pool from '../db/db.js';
 import { authenticateToken } from '../middleware/auth.js';
 import adminWare from '../middleware/admin.js';
-import bcrypt from 'bcryptjs'; // Ensure bcrypt is imported if hashing passwords here
+import bcrypt from 'bcryptjs';
 const router = express.Router();
 
 
@@ -89,7 +89,7 @@ router.get('/drivers', authenticateToken, adminWare, async (req, res) => {
  */
 router.put('/:id/password', authenticateToken, adminWare, async (req, res) => {
     const targetUserId = req.params.id;
-    const { password } = req.body;
+    const { password } = req.body || {};
 
     if (!password || password.length < 6) {
         return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
@@ -154,7 +154,11 @@ router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
 router.put('/', authenticateToken, async (req, res) => {
     // Ensure both variables extract from the identical authenticated source
     const targetUserId = req.user?.id || req.id;
-    const { username, firstName, lastName, email, password } = req.body;
+    const { username, firstName, lastName, email, password } = req.body || {};
+
+    if (password && password.length < 6) {
+        return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    }
 
     try {
         // Fetch current records to fall back on if fields are omitted in req.body
@@ -168,7 +172,7 @@ router.put('/', authenticateToken, async (req, res) => {
         const updatedEmail = email || currentUser.email;
         const updatedFirstName = firstName || currentUser.firstname;
         const updatedLastName = lastName || currentUser.lastname;
-        const updatedPassword = currentUser.password;
+        const updatedPassword = password ? await bcrypt.hash(password, 10) : currentUser.password;
 
         await pool.query(
             `UPDATE user 

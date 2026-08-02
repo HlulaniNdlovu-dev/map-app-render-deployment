@@ -1,16 +1,11 @@
 import express from 'express';
-import dotenv from 'dotenv';
 import OpenAI from 'openai';
-import { fileURLToPath } from 'url';
 import { authenticateToken } from '../middleware/auth.js';
 import requireRole from '../middleware/role.js';
 import { classifyArticleText } from '../services/classifyNews.js';
 
-// fileURLToPath (not .pathname) so this resolves correctly on Windows too —
-// a raw file:// URL's .pathname keeps a leading slash before the drive
-// letter (e.g. "/C:/Users/...") which isn't a valid filesystem path there,
-// so dotenv would silently fail to find/load the .env file on Windows.
-dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)) });
+// env vars are loaded once, centrally, by src/env.js (server.js's first
+// import) — no per-file dotenv.config() needed here anymore.
 
 const router = express.Router();
 
@@ -35,7 +30,7 @@ const MODEL  = 'gpt-4o-mini';
               risk_score, risk_level, display_color }
 ============================================================= */
 router.post('/', authenticateToken, aiOnly, async (req, res) => {
-    const { text } = req.body;
+    const { text } = req.body || {};
 
     if (!text) {
         return res.status(400).json({ error: 'No text provided.' });
@@ -56,7 +51,7 @@ router.post('/', authenticateToken, aiOnly, async (req, res) => {
    Returns: { short_location, short_description }
 ============================================================= */
 router.post('/shorten', authenticateToken, aiOnly, async (req, res) => {
-    const { location, description } = req.body;
+    const { location, description } = req.body || {};
 
     if (!location || !description) {
         return res.status(400).json({ error: 'location and description are required.' });
@@ -109,7 +104,7 @@ Description: ${description}`
    Returns: { coordinates: [lng, lat][] }
 ============================================================= */
 router.post('/safe_route', authenticateToken, aiOnly, async (req, res) => {
-    const { start, destination, avoidPlaces } = req.body;
+    const { start, destination, avoidPlaces } = req.body || {};
 
     if (!start || !destination) {
         return res.status(400).json({ error: 'start and destination are required.' });
