@@ -17,6 +17,30 @@ function sourceForRole(role) {
 }
 
 /**
+ * Best-effort notification fan-out: notifies every driver with a trip
+ * still in progress (destination.ended_at IS NULL) that a new hazard was
+ * reported, excluding the reporter. The schema doesn't persist a trip's
+ * route geometry (only free-text start/end location), so this can't
+ * filter by actual proximity to the driver's route — "active trip" is the
+ * closest available proxy for "currently driving." Never blocks or fails
+ * the hazard report itself if this fails.
+ */
+async function notifyDriversOnActiveTrips(hazardId, reporterUserId, hazardType, latitude, longitude) {
+  try {
+    const message = `New ${String(hazardType).replace(/_/g, ' ')} hazard reported at ${Number(latitude).toFixed(3)}, ${Number(longitude).toFixed(3)}.`;
+    await pool.query(
+      `INSERT INTO driver_notifications (user_id, hazard_id, message)
+       SELECT DISTINCT d.user_id, ?, ?
+       FROM destination d
+       WHERE d.ended_at IS NULL AND d.user_id != ?`,
+      [hazardId, message, reporterUserId]
+    );
+  } catch (err) {
+    console.warn('Failed to fan out driver notifications for new hazard:', err.message);
+  }
+}
+
+/**
  * POST /api/hazards
  * Commit a new hazard/danger-zone report. Used by drivers reporting a
  * hazard from the map, and by Traffic Authority (protests, road closures)
@@ -24,7 +48,7 @@ function sourceForRole(role) {
  * dashboards — same table, tagged by source.
  */
 router.post('/', authenticateToken, async (req, res) => {
-  const { latitude, longitude, hazardType } = req.body;
+  const { latitude, longitude, hazardType } = req.body || {};
   const userId = req.id;
 
   if (!userId || !latitude || !longitude || !hazardType) {
@@ -41,6 +65,8 @@ router.post('/', authenticateToken, async (req, res) => {
       INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type, source, created_at)
       VALUES (?, ?, ?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))
     `, [userId, latitude, longitude, hazardType, source]);
+
+    await notifyDriversOnActiveTrips(result.insertId, userId, hazardType, latitude, longitude);
 
     return res.status(201).json({
       success: true,
@@ -119,7 +145,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
  */
 router.put('/:id', authenticateToken, adminWare, async (req, res) => {
   const hazardId = req.params.id;
-  const { hazardType } = req.body;
+  const { hazardType } = req.body || {};
 
   if (!hazardType) {
     return res.status(400).json({ success: false, message: "hazardType is required." });
@@ -150,29 +176,35 @@ router.put('/:id', authenticateToken, adminWare, async (req, res) => {
  */
 router.patch('/:id/status', authenticateToken, requireRole('admin', 'traffic_authority', 'security_agency'), async (req, res) => {
   const hazardId = req.params.id;
-  const { status } = req.body;
+  const { status } = req.body || {};
 
   if (!['active', 'resolved'].includes(status)) {
     return res.status(400).json({ success: false, message: "status must be 'active' or 'resolved'." });
   }
 
+  const connection = await pool.getConnection();
   try {
-    const ownershipClause = req.type === 'admin' ? '' : ' AND user_id = ?';
-    const params = req.type === 'admin' ? [status, hazardId] : [status, hazardId, req.id];
-
-    const [result] = await pool.query(
-      `UPDATE hazard_reports SET status = ? WHERE id = ?${ownershipClause}`,
-      params
+    // sp_resolve_hazard does the ownership check + status update + audit
+    // log insert (hazard_resolution_log) atomically in one transaction.
+    await connection.query(
+      'CALL sp_resolve_hazard(?, ?, ?, ?, @p_status)',
+      [hazardId, status, req.id, req.type === 'admin' ? 1 : 0]
     );
+    const [[out]] = await connection.query('SELECT @p_status AS status');
 
-    if (result.affectedRows === 0) {
+    if (out.status === 'NOT_FOUND' || out.status === 'FORBIDDEN') {
       return res.status(404).json({ success: false, message: "Hazard report not found or not yours to update." });
+    }
+    if (out.status !== 'OK') {
+      return res.status(500).json({ success: false, message: "Internal update failure." });
     }
 
     return res.status(200).json({ success: true, message: `Marked ${status}.` });
   } catch (dbError) {
     console.error("Failed to update hazard status:", dbError);
     return res.status(500).json({ success: false, message: "Internal update failure." });
+  } finally {
+    connection.release();
   }
 });
 

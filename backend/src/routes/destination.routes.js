@@ -1,33 +1,17 @@
 import express from 'express';
 import pool from '../db/db.js';
+import { haversineKm, sampleLine, riskLevel, scoreRoutePath, INCIDENT_RADIUS_KM } from '../lib/safemaster.js';
 
 // ─────────────────────────────────────────────
 // Constants (mirrored from SafeMaster route_optimizer.py)
 // ─────────────────────────────────────────────
-const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
-const INCIDENT_RADIUS_KM = 0.6;
+const OSRM_BASE = process.env.OSRM_BASE_URL || 'https://router.project-osrm.org/route/v1/driving';
 const BYPASS_OFFSET_KM = 2.2;
-const W_INCIDENTS = 0.5;
-const W_AREAS = 0.3;
-const W_ALERTS = 0.2;
 
 
 // ─────────────────────────────────────────────
 // Geo Helpers
 // ─────────────────────────────────────────────
-
-/** Haversine distance in km between two lat/lng points. */
-function haversineKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.asin(Math.sqrt(a));
-}
 
 /** Initial bearing (degrees) from point 1 to point 2. */
 function bearingDeg(lat1, lon1, lat2, lon2) {
@@ -62,32 +46,6 @@ function destinationPoint(lat, lon, bearingDegrees, distKm) {
     );
   return [(lon2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
 }
-
-/**
- * Sample ~every 250 m along a LineString coordinate array.
- * Returns an array of [lon, lat] pairs.
- */
-function sampleLine(coordinates) {
-  if (!coordinates || coordinates.length === 0) return [];
-  const STEP_KM = 0.25;
-  const samples = [coordinates[0]];
-  let accumulated = 0;
-  for (let i = 1; i < coordinates.length; i++) {
-    const [lon1, lat1] = coordinates[i - 1];
-    const [lon2, lat2] = coordinates[i];
-    const seg = haversineKm(lat1, lon1, lat2, lon2);
-    accumulated += seg;
-    if (accumulated >= STEP_KM) {
-      samples.push(coordinates[i]);
-      accumulated = 0;
-    }
-  }
-  if (samples[samples.length - 1] !== coordinates[coordinates.length - 1]) {
-    samples.push(coordinates[coordinates.length - 1]);
-  }
-  return samples;
-}
-
 
 // ─────────────────────────────────────────────
 // Database Context Loader
@@ -140,90 +98,6 @@ async function loadRoutingContext() {
 
 
 // ─────────────────────────────────────────────
-// Risk Scoring
-// (equivalent to _score_route_path in Python)
-// ─────────────────────────────────────────────
-
-function riskLevel(score) {
-  if (score >= 70) return 'DANGEROUS';
-  if (score >= 40) return 'WARNING';
-  return 'SAFE';
-}
-
-/**
- * Scores a route path based on nearby incidents, risk areas, and alerts.
- * Returns { riskScore, riskLevelLabel, explanation, incidentsOnRoute, zonesPassed }
- */
-function scoreRoutePath(coordinates, startLocation, endLocation, { events, areas, alerts }) {
-  const samples = sampleLine(coordinates);
-  const incidentIds = new Set();
-  const areaScores = [];
-  const alertIds = new Set();
-  const riskZonesPassed = [];
-
-  for (const [lon, lat] of samples) {
-    for (const ev of events) {
-      if (haversineKm(lat, lon, ev.latitude, ev.longitude) <= INCIDENT_RADIUS_KM) {
-        incidentIds.add(ev.id);
-      }
-    }
-    for (const area of areas) {
-      if (area.latitude == null || area.longitude == null) continue;
-      const radius = area.radius_km || 2.5;
-      if (haversineKm(lat, lon, area.latitude, area.longitude) <= radius) {
-        areaScores.push(area.risk_score);
-        if (!riskZonesPassed.includes(area.area_name)) {
-          riskZonesPassed.push(area.area_name);
-        }
-      }
-    }
-  }
-
-  for (const alert of alerts) {
-    const msg = (alert.message || '').toLowerCase();
-    if (riskZonesPassed.some((z) => msg.includes(z.toLowerCase()))) {
-      alertIds.add(alert.id);
-    }
-  }
-
-  const incidentHits = incidentIds.size;
-  const alertHits = alertIds.size;
-  const avgArea =
-    areaScores.length > 0
-      ? areaScores.reduce((a, b) => a + b, 0) / areaScores.length
-      : 25.0; // default neutral score when no area data
-
-  const incidentComponent = Math.min(100.0, incidentHits * 12.0);
-  const alertComponent = Math.min(100.0, alertHits * 25.0);
-  const riskScore = Math.round(
-    Math.min(100.0, incidentComponent * W_INCIDENTS + avgArea * W_AREAS + alertComponent * W_ALERTS) * 100
-  ) / 100;
-
-  const level = riskLevel(riskScore);
-  const reasons = [];
-  if (incidentHits) reasons.push(`${incidentHits} hazard(s) near the route`);
-  if (riskZonesPassed.length) {
-    const high = riskZonesPassed.filter(
-      (z) => (areas.find((a) => a.area_name === z)?.risk_score ?? 0) >= 40
-    );
-    if (high.length) reasons.push(`passes through ${high.slice(0, 3).join(', ')}`);
-  }
-  if (alertHits) reasons.push(`${alertHits} active alert(s) affect this corridor`);
-
-  let explanation;
-  if (level === 'SAFE') {
-    explanation = `Low-risk corridor from ${startLocation} to ${endLocation}. ${reasons[0] || 'No major hazards or high-risk zones detected.'}`;
-  } else if (level === 'WARNING') {
-    explanation = `Moderate risk route: ${reasons.join('; ') || 'some alerts nearby'}.`;
-  } else {
-    explanation = `High-risk route — avoid if possible: ${reasons.join('; ') || 'elevated area scores'}.`;
-  }
-
-  return { riskScore, riskLevelLabel: level, explanation, incidentsOnRoute: incidentHits, zonesPassed: riskZonesPassed };
-}
-
-
-// ─────────────────────────────────────────────
 // OSRM Integration
 // (equivalent to _fetch_osrm_path / _parse_osrm_routes in Python)
 // ─────────────────────────────────────────────
@@ -240,19 +114,44 @@ function parseOsrmRoutes(data) {
     }));
 }
 
+const OSRM_MAX_RETRIES = 2;
+const OSRM_RETRY_BACKOFF_MS = [500, 1500];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetches one OSRM path with retry-with-backoff for transient failures
+ * (timeouts, 5xx, network blips). Still returns [] on final failure rather
+ * than throwing — every caller already has a graceful fallback for that
+ * (generateRoute's straight-line corridor, or the caller simply skipping a
+ * detour candidate), so this never crashes a request; it just degrades.
+ */
 async function fetchOsrmPath(...waypoints) {
   if (waypoints.length < 2) return [];
   const path = waypoints.map(([lon, lat]) => `${lon},${lat}`).join(';');
   const alt = waypoints.length === 2 ? 'true' : 'false';
   const url = `${OSRM_BASE}/${path}?overview=full&geometries=geojson&alternatives=${alt}&steps=false`;
-  try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
-    if (!resp.ok) return [];
-    return parseOsrmRoutes(await resp.json());
-  } catch (err) {
-    console.warn('OSRM routing failed:', err.message);
-    return [];
+
+  for (let attempt = 0; attempt <= OSRM_MAX_RETRIES; attempt++) {
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!resp.ok) {
+        // 4xx (bad request/coordinates) won't fix itself on retry — only
+        // retry server-side/transient failures.
+        if (resp.status < 500) return [];
+        throw new Error(`OSRM responded ${resp.status}`);
+      }
+      return parseOsrmRoutes(await resp.json());
+    } catch (err) {
+      const isLastAttempt = attempt === OSRM_MAX_RETRIES;
+      console.warn(`OSRM routing failed (attempt ${attempt + 1}/${OSRM_MAX_RETRIES + 1}):`, err.message);
+      if (isLastAttempt) return [];
+      await sleep(OSRM_RETRY_BACKOFF_MS[attempt] ?? 1500);
+    }
   }
+  return [];
 }
 
 
@@ -541,7 +440,7 @@ const normalUserRouter = express.Router();
  * coordinates for reliable results).
  */
 normalUserRouter.post('/', async (req, res) => {
-  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
+  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body || {};
   const userId = req.id;
 
   if (typeof startLocation !== 'string' || typeof endLocation !== 'string' || !startLocation.trim() || !endLocation.trim()) {
@@ -635,20 +534,32 @@ normalUserRouter.get('/', async (req, res) => {
  */
 normalUserRouter.patch('/:id/end', async (req, res) => {
   const { id } = req.params;
+  const connection = await pool.getConnection();
   try {
-    const [result] = await pool.query(
-      `UPDATE destination SET ended_at = CONVERT_TZ(NOW(), @@session.time_zone, '+02:00') WHERE id = ? AND user_id = ?`,
+    // sp_end_trip does the ownership check + ended_at update + trip_summary
+    // insert (with a server-computed duration) atomically in one transaction.
+    await connection.query(
+      'CALL sp_end_trip(?, ?, @p_status, @p_duration)',
       [id, req.id]
     );
+    const [[out]] = await connection.query('SELECT @p_status AS status, @p_duration AS durationSeconds');
 
-    if (result.affectedRows === 0) {
+    if (out.status === 'NOT_FOUND' || out.status === 'FORBIDDEN') {
       return res.status(404).json({ success: false, message: 'Trip not found.' });
     }
+    if (out.status === 'ALREADY_ENDED') {
+      return res.status(400).json({ success: false, message: 'Trip has already been ended.' });
+    }
+    if (out.status !== 'OK') {
+      return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
+    }
 
-    return res.status(200).json({ success: true, message: 'Trip ended.' });
+    return res.status(200).json({ success: true, message: 'Trip ended.', durationSeconds: out.durationSeconds });
   } catch (err) {
     console.error('Failed to end trip:', err);
     return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
+  } finally {
+    connection.release();
   }
 });
 
@@ -658,7 +569,7 @@ normalUserRouter.patch('/:id/end', async (req, res) => {
  * Useful for previewing routes before confirming a journey.
  */
 normalUserRouter.post('/generate', async (req, res) => {
-  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
+  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body || {};
 
   if (!startLocation || !endLocation || startLng == null || startLat == null || endLng == null || endLat == null) {
     return res.status(400).json({

@@ -1,0 +1,139 @@
+// Mapper — DBML schema source (Phase 5).
+// Renders at https://dbdiagram.io — paste this file's contents in.
+// Mirrors backend/src/db/schema.sql exactly. `schema_migrations` (a
+// migration-tooling table, not part of the app's data model) is
+// deliberately omitted here — see schema.sql for it.
+
+Table user {
+  user_id int [pk, increment]
+  email varchar(255) [unique, not null]
+  password varchar(255) [not null, note: 'bcrypt hash']
+  username varchar(255) [unique, not null]
+  date_created datetime
+  last_login datetime
+  firstname varchar(255)
+  lastname varchar(255)
+}
+
+// Role subtype tables — a user's role is purely "which of these 5 tables
+// contains this user_id." No role column anywhere.
+
+Table driver {
+  driver_id int [pk, increment]
+  user_id int [not null]
+}
+
+Table admin {
+  admin_id int [pk, increment]
+  user_id int [not null]
+}
+
+Table traffic_authority {
+  traffic_authority_id int [pk, increment]
+  user_id int [not null]
+}
+
+Table security_agency {
+  security_agency_id int [pk, increment]
+  user_id int [not null]
+}
+
+Table data_analyst {
+  data_analyst_id int [pk, increment]
+  user_id int [not null]
+}
+
+// Leftover many-to-many join, 0 rows, unused by any current code path.
+Table admin_driver {
+  admin_id int [not null]
+  driver_id int [not null]
+  Note: 'Composite PK (admin_id, driver_id). Unused legacy table.'
+}
+
+Table hazard_reports {
+  id int [pk, increment]
+  user_id int [not null]
+  latitude decimal(10,7) [not null]
+  longitude decimal(10,7) [not null]
+  hazard_type varchar(255) [not null, note: 'free text: pothole, protest, hijacking, etc.']
+  source varchar(32) [not null, default: 'citizen', note: 'citizen | traffic_authority | security_agency | ai_confirmed']
+  status varchar(16) [not null, default: 'active', note: 'active | resolved']
+  created_at datetime
+}
+
+Table destination {
+  id int [pk, increment]
+  user_id int [not null]
+  start_location varchar(255)
+  end_location varchar(255)
+  hazard_bypassed int [default: 0, note: 'dead column, never written']
+  ended_at datetime [note: 'NULL = trip still in progress']
+  created_at datetime
+}
+
+Table ai_risk_candidates {
+  candidate_id int [pk, increment]
+  raw_source_text text [not null]
+  source_url varchar(512)
+  classified_category varchar(64) [not null]
+  confidence decimal(4,3) [not null]
+  suggested_lat decimal(10,7)
+  suggested_lng decimal(10,7)
+  suggested_location_text varchar(255)
+  summary varchar(512)
+  status varchar(16) [not null, default: 'pending', note: 'pending | confirmed | rejected']
+  created_at datetime
+  reviewed_by int
+  reviewed_at datetime
+  resulting_hazard_id int
+}
+
+Table hazard_resolution_log {
+  log_id int [pk, increment]
+  hazard_id int [not null]
+  resolved_by int [not null]
+  previous_status varchar(16) [not null]
+  new_status varchar(16) [not null]
+  resolved_at datetime
+  Note: 'Written by sp_resolve_hazard on every hazard_reports status change.'
+}
+
+Table trip_summary {
+  summary_id int [pk, increment]
+  destination_id int [not null, unique]
+  user_id int [not null]
+  start_location varchar(255)
+  end_location varchar(255)
+  duration_seconds int [not null]
+  started_at datetime [not null]
+  ended_at datetime [not null]
+  Note: 'Written by sp_end_trip. One row per completed trip.'
+}
+
+Table driver_notifications {
+  notification_id int [pk, increment]
+  user_id int [not null]
+  hazard_id int
+  message varchar(512) [not null]
+  is_read boolean [not null, default: false]
+  created_at datetime
+  Note: 'Notification-only. Never feeds SafeMaster routing scores.'
+}
+
+Ref: driver.user_id > user.user_id
+Ref: admin.user_id > user.user_id
+Ref: traffic_authority.user_id > user.user_id
+Ref: security_agency.user_id > user.user_id
+Ref: data_analyst.user_id > user.user_id
+Ref: admin_driver.admin_id > admin.admin_id [delete: cascade]
+Ref: admin_driver.driver_id > driver.driver_id [delete: cascade]
+Ref: hazard_reports.user_id > user.user_id [delete: cascade]
+Ref: destination.user_id > user.user_id [delete: cascade]
+Ref: ai_risk_candidates.reviewed_by > user.user_id
+Ref: ai_risk_candidates.resulting_hazard_id > hazard_reports.id
+Ref: hazard_resolution_log.hazard_id > hazard_reports.id [delete: cascade]
+Ref: hazard_resolution_log.resolved_by > user.user_id
+Ref: trip_summary.destination_id > destination.id [delete: cascade]
+Ref: trip_summary.user_id > user.user_id
+Ref: driver_notifications.user_id > user.user_id [delete: cascade]
+Ref: driver_notifications.hazard_id > hazard_reports.id [delete: set null]

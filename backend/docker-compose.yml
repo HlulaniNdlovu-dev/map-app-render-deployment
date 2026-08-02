@@ -1,0 +1,21 @@
+version: "3.8"
+
+# Self-hosted OSRM for South Africa, so routing doesn't depend on the
+# public demo server's rate limits during grading/demo. See
+# docs/OSRM-SELFHOST.md for the one-time data-preparation steps this
+# service needs before `docker compose up` will serve anything.
+#
+# Once running, point the app at it:
+#   backend:  OSRM_BASE_URL=http://localhost:5000/route/v1/driving
+#   frontend: VITE_OSRM_BASE_URL=http://localhost:5000/route/v1/driving
+
+services:
+  osrm:
+    image: osrm/osrm-backend:latest
+    container_name: mapper-osrm
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./osrm-data:/data
+    command: osrm-routed --algorithm mld /data/south-africa-latest.osrm
+    restart: unless-stopped
