@@ -64,6 +64,12 @@ router.post('/register', async (req, res) => {
         const newUserId = await insertUserRow(connection, { email, password, username, firstName, lastName });
         await connection.query(`INSERT INTO driver (user_id) VALUES (?)`, [newUserId]);
 
+        // The frontend auto-navigates a fresh signup straight into the map
+        // using the token issued below — that's a real session, so
+        // last_login should reflect it immediately rather than staying
+        // NULL until some later, separate /login call.
+        await connection.query('CALL sp_record_login(?)', [newUserId]);
+
         await connection.commit();
 
         const token = jwt.sign({ userId: newUserId, userType: 'driver' }, JWT_SECRET, { expiresIn: '4h' });

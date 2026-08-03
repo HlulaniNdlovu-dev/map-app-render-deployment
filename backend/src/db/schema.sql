@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS `user` (
   `email` varchar(255) NOT NULL,
   `password` varchar(255) NOT NULL,
   `username` varchar(255) NOT NULL,
-  `date_created` datetime DEFAULT NULL,
+  `date_created` datetime DEFAULT ((now() + interval 2 hour)),
   `last_login` datetime DEFAULT NULL,
   `firstname` varchar(255) DEFAULT NULL,
   `lastname` varchar(255) DEFAULT NULL,
