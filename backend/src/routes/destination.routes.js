@@ -240,8 +240,15 @@ async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocati
       // other incident existed nearby, which is exactly the case for
       // incidents close to the user's own starting point (a dense local
       // cluster), while long trips rarely pass near unrelated incidents.
+      //
+      // Must be a COMPLETE clearance of the blocking incidents (0 hits),
+      // not merely fewer than before — a detour that still clips some of
+      // the incidents it was built to avoid is not "avoiding" them, and
+      // offering it as a suggestion is exactly what let suggestions keep
+      // routing through active hazards. Mirrors the frontend TS port
+      // (parallel-port rule) — see lib/utils.ts generateSafeRoute.
       const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
-      if (blockingHits >= incidents.length) continue;
+      if (blockingHits > 0) continue;
       const label =
         scoring.incidentsOnRoute === 0
           ? 'Safer detour (clear of hazards)'

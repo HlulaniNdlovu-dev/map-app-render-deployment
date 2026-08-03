@@ -8,10 +8,11 @@
 -- Password for every seeded user is the same as the earlier demo
 -- accounts: @Test123 (bcrypt hash below, cost factor 10).
 --
--- `admin_driver` (a many-to-many join, 0 rows live, no code anywhere
--- reads or writes it — confirmed in docs/IMPROVEMENT-PLAN.md) and
 -- `schema_migrations` (migration-tooling bookkeeping, would corrupt real
--- tracking state if seeded) are deliberately left empty.
+-- tracking state if seeded) is deliberately left empty. `admin_driver`
+-- (a many-to-many join with no current code path reading or writing it —
+-- confirmed in docs/IMPROVEMENT-PLAN.md) is seeded anyway further below,
+-- purely as demo data.
 
 SET @seed_password = '$2b$10$nM1os0rdP7n1iCibHHNPs.r/4Ozyf/aHdoaEJULb9jT37Ivt86bn2';
 
@@ -101,6 +102,20 @@ SELECT user_id FROM `user` WHERE username IN (
   'seed_analyst01','seed_analyst02','seed_analyst03','seed_analyst04','seed_analyst05',
   'seed_analyst06','seed_analyst07','seed_analyst08','seed_analyst09','seed_analyst10'
 );
+
+-- admin_driver — 10 rows spreading the 10 seed drivers across the 10 seed
+-- admins (each admin "oversees" one driver). No current code path reads
+-- this table; it's demo data only.
+INSERT INTO `admin_driver` (admin_id, driver_id)
+SELECT a.admin_id, d.driver_id
+FROM `admin` a
+INNER JOIN `user` ua ON a.user_id = ua.user_id
+INNER JOIN `driver` d ON d.driver_id = (
+  SELECT dr.driver_id FROM `driver` dr
+  INNER JOIN `user` ud ON dr.user_id = ud.user_id
+  WHERE ud.username = CONCAT('seed_driver', LPAD(SUBSTRING(ua.username, -2), 2, '0'))
+)
+WHERE ua.username LIKE 'seed_admin%';
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- hazard_reports — 15 rows spread across Pretoria/Johannesburg, mixed
