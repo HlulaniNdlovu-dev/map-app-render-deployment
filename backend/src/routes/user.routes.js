@@ -118,25 +118,30 @@ router.put('/:id/password', authenticateToken, adminWare, async (req, res) => {
  */
 router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
     const targetUserId = req.params.id;
+    const connection = await pool.getConnection();
 
     try {
-        // 1. Verify existence of the targeted resource entry before destructive execution
-        const [userCheck] = await pool.query(
-            'SELECT user_id FROM user WHERE user_id = ?',
-            [targetUserId]
-        );
+        // sp_delete_user removes the user's role-subtype row (driver/admin/
+        // etc.) and their own trip_summary rows before deleting the user
+        // row itself — a plain DELETE FROM user always failed here since
+        // none of those foreign keys cascade (every user has exactly one
+        // role-subtype row referencing them with no ON DELETE clause).
+        await connection.query('CALL sp_delete_user(?, @p_status)', [targetUserId]);
+        const [[out]] = await connection.query('SELECT @p_status AS status');
 
-        if (userCheck.length === 0) {
+        if (out.status === 'NOT_FOUND') {
             return res.status(404).json({ success: false, message: 'Target profile user not found for deletion.' });
         }
+        if (out.status === 'HAS_AUDIT_HISTORY') {
+            return res.status(409).json({
+                success: false,
+                message: 'This user resolved hazards or reviewed AI candidates on record and cannot be deleted — doing so would corrupt that audit trail.',
+            });
+        }
+        if (out.status !== 'OK') {
+            return res.status(500).json({ success: false, message: 'Internal server operational failure.' });
+        }
 
-        // 2. Execute database destruction command sequence
-        await pool.query(
-            'DELETE FROM user WHERE user_id = ?',
-            [targetUserId]
-        );
-
-        // 3. Return explicit success status indication
         return res.status(200).json({
             success: true,
             message: 'User profile successfully unlinked and purged from system records.',
@@ -145,6 +150,8 @@ router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
     } catch (error) {
         console.error('Error executing system user purge:', error);
         return res.status(500).json({ success: false, message: 'Internal server operational failure.' });
+    } finally {
+        connection.release();
     }
 });
 
@@ -207,18 +214,33 @@ router.put('/', authenticateToken, async (req, res) => {
  */
 router.delete('/', authenticateToken, async (req, res) => {
     const targetUserId = req.id
+    const connection = await pool.getConnection();
 
     try {
-        const [result] = await pool.query('DELETE FROM user WHERE user_id = ?', [targetUserId]);
+        // Same fix as the admin-initiated delete below — a plain DELETE
+        // FROM user always failed here too (every user has a role-subtype
+        // row referencing them with no ON DELETE cascade).
+        await connection.query('CALL sp_delete_user(?, @p_status)', [targetUserId]);
+        const [[out]] = await connection.query('SELECT @p_status AS status');
 
-        if (result.affectedRows === 0) {
+        if (out.status === 'NOT_FOUND') {
             return res.status(404).json({ message: 'Target user record not found.' });
+        }
+        if (out.status === 'HAS_AUDIT_HISTORY') {
+            return res.status(409).json({
+                message: 'Your account has resolved hazards or reviewed AI candidates on record and cannot be deleted — doing so would corrupt that audit trail.',
+            });
+        }
+        if (out.status !== 'OK') {
+            return res.status(500).json({ message: 'Internal server operational failure.' });
         }
 
         return res.status(200).json({ message: 'Account deleted successfully.' });
     } catch (error) {
         console.error('Error deleting user:', error);
         return res.status(500).json({ message: 'Internal server operational failure.' });
+    } finally {
+        connection.release();
     }
 });
 

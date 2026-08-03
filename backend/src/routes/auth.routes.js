@@ -176,10 +176,10 @@ router.post('/login', async (req, res) => {
             return res.status(401).json({ message: 'Invalid credentials.' });
         }
 
-        await pool.query(
-            'UPDATE user SET last_login = NOW() WHERE user_id = ?',
-            [user.user_id]
-        );
+        // sp_record_login applies the same +2 hour SAST offset every other
+        // timestamp in this system uses — the raw NOW() this replaced left
+        // last_login consistently 2 hours behind everything else.
+        await pool.query('CALL sp_record_login(?)', [user.user_id]);
 
         // 3. Determine role by checking every subtype table
         const userType = await resolveUserType(user.user_id);
