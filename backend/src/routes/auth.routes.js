@@ -208,4 +208,42 @@ router.post('/login', async (req, res) => {
     }
 });
 
+/**
+ * Public password reset -> POST /api/auth/reset-password
+ * No OTP/email verification — the account is identified by username +
+ * email matching the same row, and the new password must be confirmed
+ * client-side-shaped (also re-checked here). Intentionally simple: this
+ * is the tradeoff the product owner chose over building out an email
+ * verification flow for now.
+ */
+router.post('/reset-password', async (req, res) => {
+    const { username, email, newPassword, confirmPassword } = req.body || {};
+
+    if (!username || !email || !newPassword || !confirmPassword) {
+        return res.status(400).json({ message: 'Username, email, new password and confirmation are required.' });
+    }
+    if (newPassword !== confirmPassword) {
+        return res.status(400).json({ message: 'Passwords do not match.' });
+    }
+
+    try {
+        const [[user]] = await pool.query(
+            'SELECT user_id FROM user WHERE username = ? AND email = ?',
+            [username, email]
+        );
+
+        if (!user) {
+            return res.status(404).json({ message: 'No account matches that username and email.' });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await pool.query('UPDATE user SET password = ? WHERE user_id = ?', [hashedPassword, user.user_id]);
+
+        return res.status(200).json({ success: true, message: 'Password reset successfully.' });
+    } catch (error) {
+        console.error('Password reset runtime error:', error);
+        return res.status(500).json({ message: 'Internal server operational failure.' });
+    }
+});
+
 export default router
