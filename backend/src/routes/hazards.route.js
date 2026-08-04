@@ -63,7 +63,7 @@ router.post('/', authenticateToken, async (req, res) => {
   try {
     const [result] = await pool.query(`
       INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type, source, created_at)
-      VALUES (?, ?, ?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))
+      VALUES (?, ?, ?, ?, ?, CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+02:00'))
     `, [userId, latitude, longitude, hazardType, source]);
 
     await notifyDriversOnActiveTrips(result.insertId, userId, hazardType, latitude, longitude);
@@ -102,7 +102,10 @@ router.get('/', async (req, res) => {
         hr.hazard_type AS hazardType,
         hr.source,
         hr.status,
-        hr.created_at AS createdAt
+        -- Tag the stored SAST wall-clock value with its +02:00 offset so the
+        -- browser can parse it as an unambiguous instant regardless of where
+        -- the frontend runs (naive DATETIMEs shift when parsed as local time).
+        DATE_FORMAT(hr.created_at, '%Y-%m-%dT%H:%i:%s+02:00') AS createdAt
       FROM hazard_reports hr
       INNER JOIN user u ON hr.user_id = u.user_id
       ORDER BY hr.created_at DESC
@@ -127,7 +130,14 @@ router.get('/', async (req, res) => {
 router.get('/mine', authenticateToken, async (req, res) => {
   try {
     const [logs] = await pool.query(`
-      SELECT id, latitude, longitude, hazard_type AS hazardType, source, status, created_at AS createdAt
+      SELECT
+        id,
+        latitude,
+        longitude,
+        hazard_type AS hazardType,
+        source,
+        status,
+        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+02:00') AS createdAt
       FROM hazard_reports
       WHERE user_id = ?
       ORDER BY created_at DESC
