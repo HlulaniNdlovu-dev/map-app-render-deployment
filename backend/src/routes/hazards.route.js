@@ -1,73 +1,40 @@
 import express from 'express';
+// Import your authenticateToken middleware here (adjust the path as necessary)
 import { authenticateToken } from '../middleware/auth.js';
 import adminWare from '../middleware/admin.js';
-import requireRole from '../middleware/role.js';
-import pool from '../db/db.js';
+import  pool  from '../db/db.js';
+import { sendExport } from '../services/export.js';
 
 const router = express.Router();
 
-// A citizen (driver) can only ever file a plain report. Traffic Authority
-// and Security Agency reports are tagged with their role automatically,
-// server-side, from the authenticated user's JWT — never trusted from the
-// request body — so a regular driver can't spoof an "official" report.
-function sourceForRole(role) {
-  if (role === 'traffic_authority') return 'traffic_authority';
-  if (role === 'security_agency') return 'security_agency';
-  return 'citizen';
-}
-
-/**
- * Best-effort notification fan-out: notifies every driver with a trip
- * still in progress (destination.ended_at IS NULL) that a new hazard was
- * reported, excluding the reporter. The schema doesn't persist a trip's
- * route geometry (only free-text start/end location), so this can't
- * filter by actual proximity to the driver's route — "active trip" is the
- * closest available proxy for "currently driving." Never blocks or fails
- * the hazard report itself if this fails.
- */
-async function notifyDriversOnActiveTrips(hazardId, reporterUserId, hazardType, latitude, longitude) {
-  try {
-    const message = `New ${String(hazardType).replace(/_/g, ' ')} hazard reported at ${Number(latitude).toFixed(3)}, ${Number(longitude).toFixed(3)}.`;
-    await pool.query(
-      `INSERT INTO driver_notifications (user_id, hazard_id, message)
-       SELECT DISTINCT d.user_id, ?, ?
-       FROM destination d
-       WHERE d.ended_at IS NULL AND d.user_id != ?`,
-      [hazardId, message, reporterUserId]
-    );
-  } catch (err) {
-    console.warn('Failed to fan out driver notifications for new hazard:', err.message);
-  }
-}
-
 /**
  * POST /api/hazards
- * Commit a new hazard/danger-zone report. Used by drivers reporting a
- * hazard from the map, and by Traffic Authority (protests, road closures)
- * and Security Agency (crime hotspots, hijacking areas) from their
- * dashboards — same table, tagged by source.
+ * Commit a new telemetry hazard point
+ * 
+ * 
  */
-router.post('/', authenticateToken, async (req, res) => {
-  const { latitude, longitude, hazardType } = req.body || {};
-  const userId = req.id;
 
+router.post('/', authenticateToken, async (req, res) => {
+  const { latitude, longitude, hazardType } = req.body;
+  const userId = req.id;  // Assigned by authenticateToken middleware
+
+  // 1. Validation check
   if (!userId || !latitude || !longitude || !hazardType) {
-    return res.status(400).json({
-      success: false,
-      message: "Malformed hazard schema. Missing parameters."
+    return res.status(400).json({ 
+      success: false, 
+      message: "Malformed hazard schema. Missing parameters." 
     });
   }
 
-  const source = sourceForRole(req.type);
-
   try {
+    // 2. Insert using your global or imported async db instance
+    // Assumes 'db' is globally accessible, or imported/passed into the file
     const [result] = await pool.query(`
-      INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type, source, created_at)
-      VALUES (?, ?, ?, ?, ?, CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+02:00'))
-    `, [userId, latitude, longitude, hazardType, source]);
+      INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type, created_at)
+      VALUES (?, ?, ?, ?, CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))
+    `, [userId, latitude, longitude, hazardType]);
 
-    await notifyDriversOnActiveTrips(result.insertId, userId, hazardType, latitude, longitude);
-
+    // 3. Return clean JSON payload
     return res.status(201).json({
       success: true,
       message: "Telemetry point committed successfully.",
@@ -76,86 +43,83 @@ router.post('/', authenticateToken, async (req, res) => {
 
   } catch (dbError) {
     console.error("Database insertion fault:", dbError);
-    return res.status(500).json({
-      success: false,
-      message: "Internal record storage transactional failure."
+    return res.status(500).json({ 
+      success: false, 
+      message: "Internal record storage transactional failure." 
     });
   }
 });
 
 /**
  * GET /api/hazards
- * Compiles hazard collections for the SafePath Engine check loops, and
- * for admin/analyst views. Includes source/status so callers can tell
- * official reports apart from citizen ones and filter out resolved zones.
+ * Compiles hazard collections for the SafePath Engine check loops.
+ *
+ * MODIFIED: added hr.user_id and u.email to the SELECT so the admin
+ * hazard management page can filter/display by user. This is additive
+ * only — every field the SafePath engine (or anything else) already
+ * reads is still present under the same name, so existing consumers
+ * of this endpoint are unaffected.
  */
 router.get('/', async (req, res) => {
   try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: "Database connection uninitialized." });
+    }
+
     const [logs] = await pool.query(`
-      SELECT
-        hr.id,
+      SELECT 
+        hr.id, 
         hr.user_id,
-        u.username,
+        u.username, 
         u.email,
-        hr.latitude,
-        hr.longitude,
-        hr.hazard_type AS hazardType,
-        hr.source,
-        hr.status,
-        -- Tag the stored SAST wall-clock value with its +02:00 offset so the
-        -- browser can parse it as an unambiguous instant regardless of where
-        -- the frontend runs (naive DATETIMEs shift when parsed as local time).
-        DATE_FORMAT(hr.created_at, '%Y-%m-%dT%H:%i:%s+02:00') AS createdAt
-      FROM hazard_reports hr
+        hr.latitude, 
+        hr.longitude, 
+        hr.hazard_type AS hazardType, 
+        hr.created_at AS createdAt 
+      FROM hazard_report hr
       INNER JOIN user u ON hr.user_id = u.user_id
       ORDER BY hr.created_at DESC
     `);
+
+    const exported = sendExport(req, res, {
+      title: 'Hazard Reports',
+      description: 'Every hazard report currently on record, with the driver who filed it, its type, and where and when it was reported.',
+      sections: [{
+        columns: [
+          { key: 'id', label: 'ID', width: 0.5 },
+          { key: 'username', label: 'Username', width: 1 },
+          { key: 'email', label: 'Email', width: 1.4 },
+          { key: 'latitude', label: 'Latitude', width: 0.8 },
+          { key: 'longitude', label: 'Longitude', width: 0.8 },
+          { key: 'hazardType', label: 'Hazard Type', width: 1 },
+          { key: 'createdAt', label: 'Reported At', width: 1.2 },
+        ],
+        rows: logs,
+      }],
+    });
+    if (exported) return;
+
+    //console.log(logs);
     return res.status(200).json(logs);
 
   } catch (dbError) {
     console.error("Backend failed to fetch threat matrix data logs:", dbError);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server data retrieval failure."
+    return res.status(500).json({ 
+      success: false, 
+      message: "Internal server data retrieval failure." 
     });
   }
 });
 
 /**
- * GET /api/hazards/mine
- * Reports filed by the authenticated user — used by the Traffic Authority
- * and Security Agency dashboards to show "my reports" without needing to
- * filter the full citywide feed client-side.
- */
-router.get('/mine', authenticateToken, async (req, res) => {
-  try {
-    const [logs] = await pool.query(`
-      SELECT
-        id,
-        latitude,
-        longitude,
-        hazard_type AS hazardType,
-        source,
-        status,
-        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+02:00') AS createdAt
-      FROM hazard_reports
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-    `, [req.id]);
-    return res.status(200).json(logs);
-  } catch (dbError) {
-    console.error("Failed to fetch own hazard reports:", dbError);
-    return res.status(500).json({ success: false, message: "Internal server data retrieval failure." });
-  }
-});
-
-/**
- * PUT /api/hazards/:id
- * Admin-only. Updates ONLY hazard_type on a hazard_reports row.
+ * NEW: PUT /api/hazards/:id
+ * Admin-only. Updates ONLY hazard_type on a hazard_report row.
+ * Body: { hazardType: string }  (camelCase, matching this file's
+ * existing convention on the POST route above)
  */
 router.put('/:id', authenticateToken, adminWare, async (req, res) => {
   const hazardId = req.params.id;
-  const { hazardType } = req.body || {};
+  const { hazardType } = req.body;
 
   if (!hazardType) {
     return res.status(400).json({ success: false, message: "hazardType is required." });
@@ -163,7 +127,7 @@ router.put('/:id', authenticateToken, adminWare, async (req, res) => {
 
   try {
     const [result] = await pool.query(
-      `UPDATE hazard_reports SET hazard_type = ? WHERE id = ?`,
+      `UPDATE hazard_report SET hazard_type = ? WHERE id = ?`,
       [hazardType, hazardId]
     );
 
@@ -179,54 +143,14 @@ router.put('/:id', authenticateToken, adminWare, async (req, res) => {
 });
 
 /**
- * PATCH /api/hazards/:id/status
- * Marks a danger zone active/resolved. Admins can resolve anything;
- * Traffic Authority / Security Agency can only resolve reports they
- * themselves filed (their own protest/closure/hotspot record).
- */
-router.patch('/:id/status', authenticateToken, requireRole('admin', 'traffic_authority', 'security_agency'), async (req, res) => {
-  const hazardId = req.params.id;
-  const { status } = req.body || {};
-
-  if (!['active', 'resolved'].includes(status)) {
-    return res.status(400).json({ success: false, message: "status must be 'active' or 'resolved'." });
-  }
-
-  const connection = await pool.getConnection();
-  try {
-    // sp_resolve_hazard does the ownership check + status update + audit
-    // log insert (hazard_resolution_log) atomically in one transaction.
-    await connection.query(
-      'CALL sp_resolve_hazard(?, ?, ?, ?, @p_status)',
-      [hazardId, status, req.id, req.type === 'admin' ? 1 : 0]
-    );
-    const [[out]] = await connection.query('SELECT @p_status AS status');
-
-    if (out.status === 'NOT_FOUND' || out.status === 'FORBIDDEN') {
-      return res.status(404).json({ success: false, message: "Hazard report not found or not yours to update." });
-    }
-    if (out.status !== 'OK') {
-      return res.status(500).json({ success: false, message: "Internal update failure." });
-    }
-
-    return res.status(200).json({ success: true, message: `Marked ${status}.` });
-  } catch (dbError) {
-    console.error("Failed to update hazard status:", dbError);
-    return res.status(500).json({ success: false, message: "Internal update failure." });
-  } finally {
-    connection.release();
-  }
-});
-
-/**
- * DELETE /api/hazards/:id
- * Admin-only. Removes a hazard_reports row.
+ * NEW: DELETE /api/hazards/:id
+ * Admin-only. Removes a hazard_report row.
  */
 router.delete('/:id', authenticateToken, adminWare, async (req, res) => {
   const hazardId = req.params.id;
 
   try {
-    const [result] = await pool.query(`DELETE FROM hazard_reports WHERE id = ?`, [hazardId]);
+    const [result] = await pool.query(`DELETE FROM hazard_report WHERE id = ?`, [hazardId]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: "Hazard report not found." });

@@ -1,17 +1,34 @@
 import express from 'express';
 import pool from '../db/db.js';
-import { haversineKm, sampleLine, riskLevel, scoreRoutePath, INCIDENT_RADIUS_KM } from '../lib/safemaster.js';
+import { sendExport } from '../services/export.js';
 
 // ─────────────────────────────────────────────
 // Constants (mirrored from SafeMaster route_optimizer.py)
 // ─────────────────────────────────────────────
-const OSRM_BASE = process.env.OSRM_BASE_URL || 'https://router.project-osrm.org/route/v1/driving';
+const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
+const INCIDENT_RADIUS_KM = 0.6;
 const BYPASS_OFFSET_KM = 2.2;
+const W_INCIDENTS = 0.5;
+const W_AREAS = 0.3;
+const W_ALERTS = 0.2;
 
 
 // ─────────────────────────────────────────────
 // Geo Helpers
 // ─────────────────────────────────────────────
+
+/** Haversine distance in km between two lat/lng points. */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
 
 /** Initial bearing (degrees) from point 1 to point 2. */
 function bearingDeg(lat1, lon1, lat2, lon2) {
@@ -47,6 +64,32 @@ function destinationPoint(lat, lon, bearingDegrees, distKm) {
   return [(lon2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
 }
 
+/**
+ * Sample ~every 250 m along a LineString coordinate array.
+ * Returns an array of [lon, lat] pairs.
+ */
+function sampleLine(coordinates) {
+  if (!coordinates || coordinates.length === 0) return [];
+  const STEP_KM = 0.25;
+  const samples = [coordinates[0]];
+  let accumulated = 0;
+  for (let i = 1; i < coordinates.length; i++) {
+    const [lon1, lat1] = coordinates[i - 1];
+    const [lon2, lat2] = coordinates[i];
+    const seg = haversineKm(lat1, lon1, lat2, lon2);
+    accumulated += seg;
+    if (accumulated >= STEP_KM) {
+      samples.push(coordinates[i]);
+      accumulated = 0;
+    }
+  }
+  if (samples[samples.length - 1] !== coordinates[coordinates.length - 1]) {
+    samples.push(coordinates[coordinates.length - 1]);
+  }
+  return samples;
+}
+
+
 // ─────────────────────────────────────────────
 // Database Context Loader
 // (equivalent to _load_routing_context in Python)
@@ -66,7 +109,7 @@ async function loadRoutingContext() {
 
   try {
     const [hazardRows] = await pool.query(
-      "SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_reports WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND status = 'active'"
+      'SELECT id, latitude, longitude, hazard_type AS hazardType, 1 AS severity FROM hazard_report WHERE latitude IS NOT NULL AND longitude IS NOT NULL'
     );
     events = hazardRows;
   } catch (err) {
@@ -98,6 +141,90 @@ async function loadRoutingContext() {
 
 
 // ─────────────────────────────────────────────
+// Risk Scoring
+// (equivalent to _score_route_path in Python)
+// ─────────────────────────────────────────────
+
+function riskLevel(score) {
+  if (score >= 70) return 'DANGEROUS';
+  if (score >= 40) return 'WARNING';
+  return 'SAFE';
+}
+
+/**
+ * Scores a route path based on nearby incidents, risk areas, and alerts.
+ * Returns { riskScore, riskLevelLabel, explanation, incidentsOnRoute, zonesPassed }
+ */
+function scoreRoutePath(coordinates, startLocation, endLocation, { events, areas, alerts }) {
+  const samples = sampleLine(coordinates);
+  const incidentIds = new Set();
+  const areaScores = [];
+  const alertIds = new Set();
+  const riskZonesPassed = [];
+
+  for (const [lon, lat] of samples) {
+    for (const ev of events) {
+      if (haversineKm(lat, lon, ev.latitude, ev.longitude) <= INCIDENT_RADIUS_KM) {
+        incidentIds.add(ev.id);
+      }
+    }
+    for (const area of areas) {
+      if (area.latitude == null || area.longitude == null) continue;
+      const radius = area.radius_km || 2.5;
+      if (haversineKm(lat, lon, area.latitude, area.longitude) <= radius) {
+        areaScores.push(area.risk_score);
+        if (!riskZonesPassed.includes(area.area_name)) {
+          riskZonesPassed.push(area.area_name);
+        }
+      }
+    }
+  }
+
+  for (const alert of alerts) {
+    const msg = (alert.message || '').toLowerCase();
+    if (riskZonesPassed.some((z) => msg.includes(z.toLowerCase()))) {
+      alertIds.add(alert.id);
+    }
+  }
+
+  const incidentHits = incidentIds.size;
+  const alertHits = alertIds.size;
+  const avgArea =
+    areaScores.length > 0
+      ? areaScores.reduce((a, b) => a + b, 0) / areaScores.length
+      : 25.0; // default neutral score when no area data
+
+  const incidentComponent = Math.min(100.0, incidentHits * 12.0);
+  const alertComponent = Math.min(100.0, alertHits * 25.0);
+  const riskScore = Math.round(
+    Math.min(100.0, incidentComponent * W_INCIDENTS + avgArea * W_AREAS + alertComponent * W_ALERTS) * 100
+  ) / 100;
+
+  const level = riskLevel(riskScore);
+  const reasons = [];
+  if (incidentHits) reasons.push(`${incidentHits} hazard(s) near the route`);
+  if (riskZonesPassed.length) {
+    const high = riskZonesPassed.filter(
+      (z) => (areas.find((a) => a.area_name === z)?.risk_score ?? 0) >= 40
+    );
+    if (high.length) reasons.push(`passes through ${high.slice(0, 3).join(', ')}`);
+  }
+  if (alertHits) reasons.push(`${alertHits} active alert(s) affect this corridor`);
+
+  let explanation;
+  if (level === 'SAFE') {
+    explanation = `Low-risk corridor from ${startLocation} to ${endLocation}. ${reasons[0] || 'No major hazards or high-risk zones detected.'}`;
+  } else if (level === 'WARNING') {
+    explanation = `Moderate risk route: ${reasons.join('; ') || 'some alerts nearby'}.`;
+  } else {
+    explanation = `High-risk route — avoid if possible: ${reasons.join('; ') || 'elevated area scores'}.`;
+  }
+
+  return { riskScore, riskLevelLabel: level, explanation, incidentsOnRoute: incidentHits, zonesPassed: riskZonesPassed };
+}
+
+
+// ─────────────────────────────────────────────
 // OSRM Integration
 // (equivalent to _fetch_osrm_path / _parse_osrm_routes in Python)
 // ─────────────────────────────────────────────
@@ -114,44 +241,19 @@ function parseOsrmRoutes(data) {
     }));
 }
 
-const OSRM_MAX_RETRIES = 2;
-const OSRM_RETRY_BACKOFF_MS = [500, 1500];
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Fetches one OSRM path with retry-with-backoff for transient failures
- * (timeouts, 5xx, network blips). Still returns [] on final failure rather
- * than throwing — every caller already has a graceful fallback for that
- * (generateRoute's straight-line corridor, or the caller simply skipping a
- * detour candidate), so this never crashes a request; it just degrades.
- */
 async function fetchOsrmPath(...waypoints) {
   if (waypoints.length < 2) return [];
   const path = waypoints.map(([lon, lat]) => `${lon},${lat}`).join(';');
   const alt = waypoints.length === 2 ? 'true' : 'false';
   const url = `${OSRM_BASE}/${path}?overview=full&geometries=geojson&alternatives=${alt}&steps=false`;
-
-  for (let attempt = 0; attempt <= OSRM_MAX_RETRIES; attempt++) {
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
-      if (!resp.ok) {
-        // 4xx (bad request/coordinates) won't fix itself on retry — only
-        // retry server-side/transient failures.
-        if (resp.status < 500) return [];
-        throw new Error(`OSRM responded ${resp.status}`);
-      }
-      return parseOsrmRoutes(await resp.json());
-    } catch (err) {
-      const isLastAttempt = attempt === OSRM_MAX_RETRIES;
-      console.warn(`OSRM routing failed (attempt ${attempt + 1}/${OSRM_MAX_RETRIES + 1}):`, err.message);
-      if (isLastAttempt) return [];
-      await sleep(OSRM_RETRY_BACKOFF_MS[attempt] ?? 1500);
-    }
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!resp.ok) return [];
+    return parseOsrmRoutes(await resp.json());
+  } catch (err) {
+    console.warn('OSRM routing failed:', err.message);
+    return [];
   }
-  return [];
 }
 
 
@@ -224,31 +326,12 @@ function buildCandidate(item, scoring, label, startLocation, endLocation) {
 async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocation, endLocation, ctx) {
   const candidates = [];
   const viaPoints = bypassViaPoints(incidents, startCoord, endCoord);
-  // Scoped context used only to count hits against the specific hazards
-  // this detour is meant to avoid — see note below.
-  const blockingCtx = { events: incidents, areas: [], alerts: [] };
 
   for (const via of viaPoints.slice(0, 8)) {
     for (const osrmItem of await fetchOsrmPath(startCoord, via, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      // Gate on hits against the incidents this detour was built to avoid,
-      // not the total incident count city-wide — a detour that clears the
-      // incidents blocking the direct route is a real improvement even if
-      // it happens to pass near some unrelated incident elsewhere. Gating
-      // on the total count instead rejected every detour whenever any
-      // other incident existed nearby, which is exactly the case for
-      // incidents close to the user's own starting point (a dense local
-      // cluster), while long trips rarely pass near unrelated incidents.
-      //
-      // Must be a COMPLETE clearance of the blocking incidents (0 hits),
-      // not merely fewer than before — a detour that still clips some of
-      // the incidents it was built to avoid is not "avoiding" them, and
-      // offering it as a suggestion is exactly what let suggestions keep
-      // routing through active hazards. Mirrors the frontend TS port
-      // (parallel-port rule) — see lib/utils.ts generateSafeRoute.
-      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
-      if (blockingHits > 0) continue;
+      if (scoring.incidentsOnRoute >= incidents.length) continue;
       const label =
         scoring.incidentsOnRoute === 0
           ? 'Safer detour (clear of hazards)'
@@ -262,8 +345,7 @@ async function fetchAvoidanceRoutes(startCoord, endCoord, incidents, startLocati
     for (const osrmItem of await fetchOsrmPath(startCoord, via0, via1, endCoord)) {
       const coords = osrmItem.geojson.geometry.coordinates;
       const scoring = scoreRoutePath(coords, startLocation, endLocation, ctx);
-      const blockingHits = scoreRoutePath(coords, startLocation, endLocation, blockingCtx).incidentsOnRoute;
-      if (blockingHits === 0) {
+      if (scoring.incidentsOnRoute === 0) {
         candidates.push(
           buildCandidate(osrmItem, scoring, 'Multi-point detour (clear of hazards)', startLocation, endLocation)
         );
@@ -447,60 +529,50 @@ const normalUserRouter = express.Router();
  * coordinates for reliable results).
  */
 normalUserRouter.post('/', async (req, res) => {
-  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body || {};
+  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
   const userId = req.id;
 
-  if (typeof startLocation !== 'string' || typeof endLocation !== 'string' || !startLocation.trim() || !endLocation.trim()) {
+  if (!startLocation || !endLocation) {
     return res.status(400).json({
       success: false,
       message: 'Missing startLocation or endLocation parameters.',
     });
   }
 
+  // Coordinates are required for full route generation.
+  if (startLng == null || startLat == null || endLng == null || endLat == null) {
+    return res.status(400).json({
+      success: false,
+      message: 'Missing coordinate parameters (startLng, startLat, endLng, endLat).',
+    });
+  }
+
   try {
-    // Persist independently of route generation. The map page already generates
-    // its route client-side and sends only the two location labels, so requiring
-    // coordinates here previously rejected every valid destination submission.
+    // 1. Generate the safest route using the rerouting engine
+    const routeResult = await generateRoute(
+      startLocation,
+      endLocation,
+      [parseFloat(startLng), parseFloat(startLat)],
+      [parseFloat(endLng), parseFloat(endLat)]
+    );
+
+    // 2. Persist the destination log
     const [result] = await pool.query(
       `INSERT INTO destination (user_id, start_location, end_location) VALUES (?, ?, ?)`,
-      [userId, startLocation.trim(), endLocation.trim()]
+      [userId, startLocation, endLocation]
     );
-
-    const hasCoordinates = [startLng, startLat, endLng, endLat].every(
-      (value) => value != null && Number.isFinite(Number(value))
-    );
-
-    // Preserve route-generation support for callers that provide coordinates,
-    // but never roll back a successfully saved destination when routing fails.
-    if (hasCoordinates) {
-      try {
-        const route = await generateRoute(
-          startLocation.trim(),
-          endLocation.trim(),
-          [Number(startLng), Number(startLat)],
-          [Number(endLng), Number(endLat)]
-        );
-        return res.status(201).json({
-          success: true,
-          message: 'Destination saved and route generated successfully.',
-          logId: result.insertId,
-          route,
-        });
-      } catch (routeError) {
-        console.warn('Destination saved, but route generation failed:', routeError.message);
-      }
-    }
 
     return res.status(201).json({
       success: true,
-      message: 'Destination saved successfully.',
+      message: 'Route generated and destination tracked successfully.',
       logId: result.insertId,
+      route: routeResult,
     });
   } catch (err) {
-    console.error('Destination tracking failure:', err);
+    console.error('Route generation or tracking failure:', err);
     return res.status(500).json({
       success: false,
-      message: 'Internal server failure while saving the destination.',
+      message: 'Internal server failure during route generation.',
     });
   }
 });
@@ -516,7 +588,6 @@ normalUserRouter.get('/', async (req, res) => {
       `SELECT id,
               start_location AS startLocation,
               end_location   AS endLocation,
-              ended_at       AS endedAt,
               created_at     AS createdAt
        FROM destination
        WHERE user_id = ?
@@ -534,49 +605,12 @@ normalUserRouter.get('/', async (req, res) => {
 });
 
 /**
- * PATCH /api/normal-user/destinations/:id/end
- * Marks a logged trip as completed (the "End Trip" use case) — records
- * when the driver actually reached their destination. Scoped to the
- * authenticated user's own trip.
- */
-normalUserRouter.patch('/:id/end', async (req, res) => {
-  const { id } = req.params;
-  const connection = await pool.getConnection();
-  try {
-    // sp_end_trip does the ownership check + ended_at update + trip_summary
-    // insert (with a server-computed duration) atomically in one transaction.
-    await connection.query(
-      'CALL sp_end_trip(?, ?, @p_status, @p_duration)',
-      [id, req.id]
-    );
-    const [[out]] = await connection.query('SELECT @p_status AS status, @p_duration AS durationSeconds');
-
-    if (out.status === 'NOT_FOUND' || out.status === 'FORBIDDEN') {
-      return res.status(404).json({ success: false, message: 'Trip not found.' });
-    }
-    if (out.status === 'ALREADY_ENDED') {
-      return res.status(400).json({ success: false, message: 'Trip has already been ended.' });
-    }
-    if (out.status !== 'OK') {
-      return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
-    }
-
-    return res.status(200).json({ success: true, message: 'Trip ended.', durationSeconds: out.durationSeconds });
-  } catch (err) {
-    console.error('Failed to end trip:', err);
-    return res.status(500).json({ success: false, message: 'Internal server failure ending trip.' });
-  } finally {
-    connection.release();
-  }
-});
-
-/**
  * POST /api/normal-user/destinations/generate
  * Generates a risk-scored route WITHOUT persisting a log entry.
  * Useful for previewing routes before confirming a journey.
  */
 normalUserRouter.post('/generate', async (req, res) => {
-  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body || {};
+  const { startLocation, endLocation, startLng, startLat, endLng, endLat } = req.body;
 
   if (!startLocation || !endLocation || startLng == null || startLat == null || endLng == null || endLat == null) {
     return res.status(400).json({
@@ -623,12 +657,30 @@ adminRouter.get('/', async (req, res) => {
               d.start_location  AS startLocation,
               d.end_location    AS endLocation,
               d.hazard_bypassed AS hazardBypassed,
-              d.ended_at        AS endedAt,
               d.created_at      AS createdAt
        FROM destination d
        INNER JOIN user u ON d.user_id = u.user_id
        ORDER BY d.created_at DESC`
     );
+
+    const exported = sendExport(req, res, {
+      title: 'Logged Destinations',
+      description: 'A global audit log of every destination route logged by drivers across the system.',
+      sections: [{
+        columns: [
+          { key: 'id', label: 'ID', width: 0.5 },
+          { key: 'username', label: 'Username', width: 1 },
+          { key: 'email', label: 'Email', width: 1.4 },
+          { key: 'startLocation', label: 'Start', width: 1.5 },
+          { key: 'endLocation', label: 'End', width: 1.5 },
+          { key: 'hazardBypassed', label: 'Hazards Bypassed', width: 1 },
+          { key: 'createdAt', label: 'Logged At', width: 1.2 },
+        ],
+        rows: rows,
+      }],
+    });
+    if (exported) return;
+
     return res.status(200).json(rows);
   } catch (err) {
     console.error('Admin destination pull failure:', err);

@@ -1,21 +1,18 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import requireRole from '../middleware/role.js';
+import adminWare from '../middleware/admin.js';
 import pool from '../db/db.js';
 import { ingestNews } from '../services/newsIngest.js';
 
 const router = express.Router();
 
-// Same access rule as /api/analyse/* — Admin and Data Analyst only.
-const aiOnly = requireRole('admin', 'data_analyst');
-
 /**
  * POST /api/ai/ingest
  * Pulls recent news, classifies each item, geocodes the suggested
  * location, and stores results as PENDING candidates. Never touches
- * hazard_reports — see docs/AI-FEATURE.md.
+ * hazard_report directly.
  */
-router.post('/ingest', authenticateToken, aiOnly, async (req, res) => {
+router.post('/ingest', authenticateToken, adminWare, async (req, res) => {
   try {
     const result = await ingestNews();
     return res.status(200).json({ success: true, ...result });
@@ -30,7 +27,7 @@ router.post('/ingest', authenticateToken, aiOnly, async (req, res) => {
  * Defaults to pending candidates, ranked by confidence desc — the review
  * queue. ?status=confirmed|rejected lets a reviewer look back at history.
  */
-router.get('/candidates', authenticateToken, aiOnly, async (req, res) => {
+router.get('/candidates', authenticateToken, adminWare, async (req, res) => {
   const status = ['pending', 'confirmed', 'rejected'].includes(req.query.status)
     ? req.query.status
     : 'pending';
@@ -40,7 +37,7 @@ router.get('/candidates', authenticateToken, aiOnly, async (req, res) => {
       `SELECT candidate_id, raw_source_text, source_url, classified_category,
               confidence, suggested_lat, suggested_lng, suggested_location_text,
               summary, status, created_at, reviewed_by, reviewed_at, resulting_hazard_id
-       FROM ai_risk_candidates
+       FROM ai_risk_candidate
        WHERE status = ?
        ORDER BY confidence DESC, created_at DESC`,
       [status]
@@ -55,18 +52,16 @@ router.get('/candidates', authenticateToken, aiOnly, async (req, res) => {
 /**
  * POST /api/ai/candidates/:id/confirm
  * Human-in-the-loop promotion: only this action ever creates a real
- * hazard_reports row from AI output, and only after a person reviewed it.
- * Requires the candidate to have a resolved location — a candidate with no
- * geocoded coordinates can't be placed on the map and must be rejected
- * instead (or re-ingested with a clearer source location).
+ * hazard_report row from AI output, and only after a person reviewed it.
+ * Requires the candidate to have a resolved location.
  */
-router.post('/candidates/:id/confirm', authenticateToken, aiOnly, async (req, res) => {
+router.post('/candidates/:id/confirm', authenticateToken, adminWare, async (req, res) => {
   const { id } = req.params;
 
   const connection = await pool.getConnection();
   try {
     const [[candidate]] = await connection.query(
-      'SELECT * FROM ai_risk_candidates WHERE candidate_id = ?',
+      'SELECT * FROM ai_risk_candidate WHERE candidate_id = ?',
       [id]
     );
 
@@ -86,13 +81,13 @@ router.post('/candidates/:id/confirm', authenticateToken, aiOnly, async (req, re
     await connection.beginTransaction();
 
     const [hazardResult] = await connection.query(
-      `INSERT INTO hazard_reports (user_id, latitude, longitude, hazard_type, source, status, created_at)
+      `INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type, source, status, created_at)
        VALUES (?, ?, ?, ?, 'ai_confirmed', 'active', CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))`,
       [req.id, candidate.suggested_lat, candidate.suggested_lng, candidate.classified_category]
     );
 
     await connection.query(
-      `UPDATE ai_risk_candidates
+      `UPDATE ai_risk_candidate
        SET status = 'confirmed', reviewed_by = ?, reviewed_at = CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'), resulting_hazard_id = ?
        WHERE candidate_id = ?`,
       [req.id, hazardResult.insertId, id]
@@ -116,14 +111,14 @@ router.post('/candidates/:id/confirm', authenticateToken, aiOnly, async (req, re
 
 /**
  * POST /api/ai/candidates/:id/reject
- * No hazard_reports write happens here at all — rejecting an AI candidate
+ * No hazard_report write happens here at all — rejecting an AI candidate
  * has zero effect on routing or any other part of the system.
  */
-router.post('/candidates/:id/reject', authenticateToken, aiOnly, async (req, res) => {
+router.post('/candidates/:id/reject', authenticateToken, adminWare, async (req, res) => {
   const { id } = req.params;
   try {
     const [result] = await pool.query(
-      `UPDATE ai_risk_candidates
+      `UPDATE ai_risk_candidate
        SET status = 'rejected', reviewed_by = ?, reviewed_at = CONVERT_TZ(NOW(), @@session.time_zone, '+02:00')
        WHERE candidate_id = ? AND status = 'pending'`,
       [req.id, id]

@@ -7,9 +7,8 @@ import { geocodeForward } from './geocode.js';
 const rssParser = new Parser();
 
 // Kept small deliberately — classification burns real OpenAI credits per
-// item, and this is a manually-triggered demo/review feature, not a
-// background cron job (see docs/IMPROVEMENT-PLAN.md §5). An admin can just
-// trigger ingestion again for more.
+// item, and this is a manually-triggered review feature, not a background
+// cron job. An admin can just trigger ingestion again for more.
 const MAX_ITEMS_PER_INGEST = 5;
 
 // Most SA news sites 403 (or redirect-loop) a request with no User-Agent —
@@ -72,7 +71,7 @@ async function fetchNewsItems(sourceUrl) {
 /**
  * Full ingestion pass: fetch -> classify each item -> geocode the
  * classifier's suggested location -> insert as a PENDING candidate. Never
- * writes to hazard_reports directly — see docs/AI-FEATURE.md for why.
+ * writes to hazard_reports directly.
  */
 export async function ingestNews() {
   const sourceUrl = process.env.NEWS_SOURCE_URL || 'https://www.iol.co.za/rss';
@@ -87,7 +86,7 @@ export async function ingestNews() {
       const geo = await geocodeForward(classification.location);
 
       const [result] = await pool.query(
-        `INSERT INTO ai_risk_candidates
+        `INSERT INTO ai_risk_candidate
            (raw_source_text, source_url, classified_category, confidence,
             suggested_lat, suggested_lng, suggested_location_text, summary)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

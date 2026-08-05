@@ -1,8 +1,5 @@
 // Server-side Geoapify wrapper. Calling Geoapify from the backend (rather
-// than the browser) means the API key never has to reach a client at all —
-// this is the same shape Phase 4's frontend-facing geocode proxy will use,
-// just consumed in-process here for AI candidate geocoding instead of over
-// HTTP from the SPA.
+// than the browser) means the API key never has to reach a client at all.
 
 const GEOAPIFY_BASE = 'https://api.geoapify.com/v1/geocode';
 
@@ -23,7 +20,7 @@ export async function geocodeForward(query) {
   try {
     const key = getKey();
     const res = await fetch(
-      `${GEOAPIFY_BASE}/search?text=${encodeURIComponent(query)}&format=json&apiKey=${key}`
+      `${GEOAPIFY_BASE}/search?text=${encodeURIComponent(query)}&filter=countrycode:za&format=json&apiKey=${key}`
     );
     if (!res.ok) return null;
     const data = await res.json();
@@ -32,22 +29,6 @@ export async function geocodeForward(query) {
     return { lat: point.lat, lng: point.lon, formatted: point.formatted };
   } catch (err) {
     console.warn('Forward geocode failed:', err.message);
-    return null;
-  }
-}
-
-/** Reverse-geocodes coordinates to a formatted address. Same null-on-failure contract. */
-export async function geocodeReverse(lat, lon) {
-  try {
-    const key = getKey();
-    const res = await fetch(
-      `${GEOAPIFY_BASE}/reverse?lat=${lat}&lon=${lon}&format=json&apiKey=${key}`
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.results?.[0] || null;
-  } catch (err) {
-    console.warn('Reverse geocode failed:', err.message);
     return null;
   }
 }

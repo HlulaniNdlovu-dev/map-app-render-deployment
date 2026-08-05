@@ -1,15 +1,6 @@
-// Shared CSV/PDF export used by all 4 admin/analyst reports
-// (reports.routes.js). No new CSV dependency — RFC4180 escaping is a
-// handful of lines. PDF uses pdfkit (lightweight, no headless-browser
-// dependency like puppeteer would need).
-//
-// Every export carries a plain-language `description` explaining what the
-// report shows and how to read it, plus a `filters` summary of whatever
-// the caller narrowed the data by — a PDF or CSV handed to someone outside
-// the live app should be understandable on its own, not just a bare data
-// dump. Brand palette matches the frontend's Tailwind theme
-// (frontend_v2/src/index.css --color-brand-*) so exports look like part
-// of the same product.
+// Shared CSV/PDF export used by the admin report/list endpoints. No CSV
+// dependency — RFC4180 escaping is a handful of lines. PDF uses pdfkit
+// (lightweight, no headless-browser dependency).
 import PDFDocument from 'pdfkit';
 
 const BRAND = {
@@ -31,11 +22,6 @@ function csvEscape(value) {
   return str;
 }
 
-/**
- * Renders one labeled table as a CSV block: a "## label" heading line,
- * a header row, then data rows. Multiple blocks can be concatenated to
- * build a multi-section report (see the safety report's CSV export).
- */
 function csvSection(label, columns, rows) {
   const lines = [];
   if (label) lines.push(`## ${label}`);
@@ -44,24 +30,6 @@ function csvSection(label, columns, rows) {
     lines.push(columns.map((c) => csvEscape(row[c.key])).join(','));
   }
   return lines.join('\n');
-}
-
-/**
- * Builds a full CSV document from one or more sections, with a plain-text
- * comment header explaining what the report is and what it's filtered by
- * (so the file is still understandable once it's out of the app).
- * sections: [{ label, columns: [{key, label}], rows: [...] }]
- */
-export function buildCsv(title, generatedAt, sections, { description, filters } = {}) {
-  const parts = [`# ${title} — Mapper Safe Route Navigation System`, `# Generated: ${generatedAt}`];
-  if (filters) parts.push(`# Filters applied: ${filters}`);
-  if (description) {
-    parts.push('#');
-    for (const line of wrapPlainText(description, 100)) parts.push(`# ${line}`);
-  }
-  parts.push('');
-  parts.push(sections.map((s) => csvSection(s.label, s.columns, s.rows)).join('\n\n'));
-  return parts.join('\n') + '\n';
 }
 
 function wrapPlainText(text, maxLen) {
@@ -81,13 +49,22 @@ function wrapPlainText(text, maxLen) {
 }
 
 /**
- * Streams a styled PDF report directly to the Express response: branded
- * header band, title, generated-at + applied-filters line, a plain-language
- * explanation of what the report shows and how to read it, then one or
- * more shaded/bordered tables. Column widths are proportional (via each
- * column's optional `width` weight, default 1) rather than fixed-equal, so
- * narrow ID columns don't waste space next to long text columns.
+ * Builds a full CSV document from one or more sections.
+ * sections: [{ label, columns: [{key, label}], rows: [...] }]
  */
+export function buildCsv(title, generatedAt, sections, { description, filters } = {}) {
+  const parts = [`# ${title} — Mapper Route Safety Monitor`, `# Generated: ${generatedAt}`];
+  if (filters) parts.push(`# Filters applied: ${filters}`);
+  if (description) {
+    parts.push('#');
+    for (const line of wrapPlainText(description, 100)) parts.push(`# ${line}`);
+  }
+  parts.push('');
+  parts.push(sections.map((s) => csvSection(s.label, s.columns, s.rows)).join('\n\n'));
+  return parts.join('\n') + '\n';
+}
+
+/** Streams a styled PDF report directly to the Express response. */
 export function streamPdf(res, title, generatedAt, sections, { description, filters } = {}) {
   const doc = new PDFDocument({ margin: 0, size: 'A4', bufferPages: true });
   res.setHeader('Content-Type', 'application/pdf');
@@ -96,16 +73,12 @@ export function streamPdf(res, title, generatedAt, sections, { description, filt
   const MARGIN = 40;
   const pageWidth = doc.page.width;
   const contentWidth = pageWidth - MARGIN * 2;
-  const pageBottom = () => doc.page.height - 60; // reserve room for the footer
+  const pageBottom = () => doc.page.height - 60;
 
   function drawHeaderBand() {
     doc.rect(0, 0, pageWidth, 64).fill(BRAND.blueDark);
     doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(16).text('MAPPER', MARGIN, 18);
-    doc
-      .fillColor('#c9d6f5')
-      .font('Helvetica')
-      .fontSize(9)
-      .text('Safe Route Navigation System', MARGIN, 38);
+    doc.fillColor('#c9d6f5').font('Helvetica').fontSize(9).text('Route Safety Monitor', MARGIN, 38);
     doc.fillColor(BRAND.ink);
   }
 
@@ -116,7 +89,7 @@ export function streamPdf(res, title, generatedAt, sections, { description, filt
       .font('Helvetica')
       .fontSize(8)
       .fillColor(BRAND.muted)
-      .text('Mapper — Safe Route Navigation System · Internal report', MARGIN, y + 8, { continued: false })
+      .text('Mapper — Route Safety Monitor · Internal report', MARGIN, y + 8, { continued: false })
       .text(`Page ${pageNumber}`, pageWidth - MARGIN - 60, y + 8, { width: 60, align: 'right' });
   }
 
@@ -137,9 +110,7 @@ export function streamPdf(res, title, generatedAt, sections, { description, filt
     doc.font('Helvetica').fontSize(9.5);
     const textHeight = doc.heightOfString(description, { width: contentWidth - 24 });
     doc.rect(MARGIN, boxTop, contentWidth, textHeight + 20).fill(BRAND.blueSoft);
-    doc
-      .fillColor(BRAND.blueDark)
-      .text(description, MARGIN + 12, boxTop + 10, { width: contentWidth - 24 });
+    doc.fillColor(BRAND.blueDark).text(description, MARGIN + 12, boxTop + 10, { width: contentWidth - 24 });
     doc.y = boxTop + textHeight + 20 + 16;
     doc.fillColor(BRAND.ink);
   }
@@ -186,7 +157,6 @@ export function streamPdf(res, title, generatedAt, sections, { description, filt
     }
 
     section.rows.forEach((row, i) => {
-      // Estimate row height from the tallest wrapped cell.
       doc.font('Helvetica').fontSize(8.5);
       const cellHeights = columns.map((col, ci) => {
         const value = row[col.key];
@@ -231,20 +201,25 @@ export function streamPdf(res, title, generatedAt, sections, { description, filt
   doc.end();
 }
 
-/** Parses ?sortDir=asc|desc, defaulting to desc. */
-export function parseSortDir(value, fallback = 'desc') {
-  return value === 'asc' ? 'asc' : value === 'desc' ? 'desc' : fallback;
-}
+/**
+ * Sends an export response if req.query.format is csv/pdf, otherwise
+ * returns null so the caller can fall back to its normal JSON response.
+ */
+export function sendExport(req, res, { title, sections, description, filters }) {
+  const format = (req.query.format || 'json').toLowerCase();
+  const generatedAt = new Date().toISOString();
+  const filtersText = filters && filters.length ? filters.join('; ') : 'none — showing all records';
 
-export function sortRows(rows, key, dir) {
-  const sign = dir === 'asc' ? 1 : -1;
-  return [...rows].sort((a, b) => {
-    const av = a[key];
-    const bv = b[key];
-    if (av == null && bv == null) return 0;
-    if (av == null) return 1;
-    if (bv == null) return -1;
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * sign;
-    return String(av).localeCompare(String(bv)) * sign;
-  });
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${title.replace(/\s+/g, '_').toLowerCase()}.csv"`);
+    res.status(200).send(buildCsv(title, generatedAt, sections, { description, filters: filtersText }));
+    return true;
+  }
+  if (format === 'pdf') {
+    res.setHeader('Content-Disposition', `attachment; filename="${title.replace(/\s+/g, '_').toLowerCase()}.pdf"`);
+    streamPdf(res, title, generatedAt, sections, { description, filters: filtersText });
+    return true;
+  }
+  return false;
 }
