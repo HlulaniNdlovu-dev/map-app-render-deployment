@@ -11,7 +11,7 @@ router.get('/health', (req, res) => {
     res.json({ status: 'ok', route: '/api/analyse', apiKeyLoaded: !!process.env.OPENAI_API_KEY });
 });
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ||'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'});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ||'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'});
 const MODEL  = 'gpt-4o-mini';
 
 /* =============================================================
