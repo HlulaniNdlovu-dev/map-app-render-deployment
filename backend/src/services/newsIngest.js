@@ -70,14 +70,19 @@ async function fetchNewsItems(sourceUrl) {
 
 /**
  * Full ingestion pass: fetch -> classify each item -> geocode the
- * classifier's suggested location -> insert as a PENDING candidate. Never
- * writes to hazard_reports directly.
+ * classifier's suggested location -> insert directly into hazard_report
+ * (source='ai_confirmed', status='active') when a location resolves.
+ * There is no separate review-queue table (ai_risk_candidates) in this
+ * deployment — items with no resolvable location are skipped rather than
+ * held for manual review, since they can't be placed on the map at all.
+ * `userId` is the admin who triggered ingestion, recorded as the reporter.
  */
-export async function ingestNews() {
+export async function ingestNews(userId) {
   const sourceUrl = process.env.NEWS_SOURCE_URL || 'https://www.iol.co.za/rss';
 
   const items = await fetchNewsItems(sourceUrl);
   const created = [];
+  const skipped = [];
   const errors = [];
 
   for (const item of items) {
@@ -85,29 +90,23 @@ export async function ingestNews() {
       const classification = await classifyArticleText(item.text);
       const geo = await geocodeForward(classification.location);
 
+      if (!geo) {
+        skipped.push({ url: item.url, title: item.title, reason: 'No resolvable location.' });
+        continue;
+      }
+
       const [result] = await pool.query(
-        `INSERT INTO ai_risk_candidate
-           (raw_source_text, source_url, classified_category, confidence,
-            suggested_lat, suggested_lng, suggested_location_text, summary)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          item.text.slice(0, 4000),
-          item.url,
-          classification.hazard_type,
-          classification.confidence,
-          geo?.lat ?? null,
-          geo?.lng ?? null,
-          classification.location,
-          classification.summary,
-        ]
+        `INSERT INTO hazard_report (user_id, latitude, longitude, hazard_type, source, status, created_at)
+         VALUES (?, ?, ?, ?, 'ai_confirmed', 'active', CONVERT_TZ(NOW(), @@session.time_zone, '+02:00'))`,
+        [userId, geo.lat, geo.lng, classification.hazard_type]
       );
 
       created.push({
-        candidateId: result.insertId,
+        hazardId: result.insertId,
         title: item.title,
         category: classification.hazard_type,
         confidence: classification.confidence,
-        hasLocation: !!geo,
+        location: geo.formatted || classification.location,
       });
     } catch (err) {
       console.error('Failed to classify/store news item:', item.url, err.message);
@@ -115,5 +114,5 @@ export async function ingestNews() {
     }
   }
 
-  return { sourceUrl, itemsFound: items.length, created, errors };
+  return { sourceUrl, itemsFound: items.length, created, skipped, errors };
 }
