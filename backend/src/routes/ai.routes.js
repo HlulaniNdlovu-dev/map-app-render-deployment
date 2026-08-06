@@ -27,6 +27,7 @@ router.post('/ingest', authenticateToken, adminWare, async (req, res) => {
  * Defaults to pending candidates, ranked by confidence desc — the review
  * queue. ?status=confirmed|rejected lets a reviewer look back at history.
  */
+/*
 router.get('/candidates', authenticateToken, adminWare, async (req, res) => {
   const status = ['pending', 'confirmed', 'rejected'].includes(req.query.status)
     ? req.query.status
@@ -55,6 +56,7 @@ router.get('/candidates', authenticateToken, adminWare, async (req, res) => {
  * hazard_report row from AI output, and only after a person reviewed it.
  * Requires the candidate to have a resolved location.
  */
+
 router.post('/candidates/:id/confirm', authenticateToken, adminWare, async (req, res) => {
   const { id } = req.params;
 
