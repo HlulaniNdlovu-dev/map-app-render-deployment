@@ -11,7 +11,7 @@ router.get('/health', (req, res) => {
     res.json({ status: 'ok', route: '/api/analyse', apiKeyLoaded: !!process.env.OPENAI_API_KEY });
 });
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ||'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'});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY});
 const MODEL  = 'gpt-4o-mini';
 
 /* =============================================================
